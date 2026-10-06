@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import winreg
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -188,6 +189,50 @@ def human_size(n: float) -> str:
             return f"{n:.0f} {unit}" if unit in ("B", "KB", "MB") else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} PB"
+
+
+# ======================================================================
+# 开机自启:写 HKCU 的 Run 键。不需要管理员权限,任务管理器 -> 启动 里也能关
+# ======================================================================
+
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def autostart_command() -> str:
+    """写进注册表的启动命令:打包后就是 exe 自身,开发时用 pythonw 跑本脚本。
+
+    两头都给路径加引号,否则目录名带空格时会被系统当成多个参数切开。
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    interpreter = Path(sys.executable).with_name("pythonw.exe")
+    if not interpreter.exists():  # 少数环境没有 pythonw,退回 python(会带个控制台窗口)
+        interpreter = Path(sys.executable)
+    return f'"{interpreter}" "{Path(__file__).resolve()}"'
+
+
+def is_autostart_enabled() -> bool:
+    """注册表里的命令和当前运行方式一致才算开启 —— 换过路径就不算。"""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, APP_NAME)
+    except OSError:
+        return False
+    return str(value).strip().casefold() == autostart_command().casefold()
+
+
+def set_autostart(enabled: bool) -> None:
+    """增删 Run 键;失败交给调用方处理(可能没有写权限或被组策略拦住)。"""
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE
+    ) as key:
+        if enabled:
+            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, autostart_command())
+            return
+        try:
+            winreg.DeleteValue(key, APP_NAME)
+        except FileNotFoundError:
+            pass
 
 
 # ======================================================================
@@ -520,6 +565,10 @@ class TrayIcon(QSystemTrayIcon):
         self._click_through.setCheckable(True)
         self._click_through.toggled.connect(window.set_click_through)
 
+        self._autostart = self._menu.addAction("开机自启")
+        self._autostart.setCheckable(True)
+        self._autostart.toggled.connect(self._set_autostart)
+
         self._menu.addSeparator()
         self._menu.addAction("退出", QApplication.quit)
         self._menu.aboutToShow.connect(self._sync_state)
@@ -539,6 +588,17 @@ class TrayIcon(QSystemTrayIcon):
         self._click_through.blockSignals(True)  # 否则会回环触发 set_click_through
         self._click_through.setChecked(blocked)
         self._click_through.blockSignals(False)
+
+        self._autostart.blockSignals(True)  # 同上,避免回环
+        self._autostart.setChecked(is_autostart_enabled())
+        self._autostart.blockSignals(False)
+
+    def _set_autostart(self, enabled: bool) -> None:
+        try:
+            set_autostart(enabled)
+        except OSError as error:
+            print(f"警告: 设置开机自启失败:{error}", file=sys.stderr)
+        self._sync_state()  # 以注册表的实际结果为准,别让勾选状态骗人
 
     def _toggle_visible(self) -> None:
         if self._window.isVisible():
