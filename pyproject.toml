@@ -10,3 +10,20 @@ dependencies = [
 dev = [
     "pyinstaller>=6.22.3",
 ]
+
+[tool.ruff.lint]
+# 在 ruff 默认规则之上加命名检查(extend 而非 select,避免顶掉默认规则集)
+extend-select = ["N"]
+
+[tool.ruff.lint.pep8-naming]
+# Qt 的重写方法名必须是驼峰,改成 snake_case 就不再是重写、会静默失效。
+# 集中在这里豁免,不要用行内 noqa;新增 Qt 重写方法就把名字补进列表。
+extend-ignore-names = [
+    "paintEvent",
+    "enterEvent",
+    "leaveEvent",
+    "mousePressEvent",
+    "mouseMoveEvent",
+    "mouseReleaseEvent",
+    "contextMenuEvent",
+]
