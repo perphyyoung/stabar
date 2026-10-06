@@ -10,6 +10,8 @@
 打包:   uv run pyinstaller --noconfirm --clean stabar.spec   (产物在 dist\\stabar)
 配置:   开发时 = 项目目录下的 stabar.ini
         打包后 = %LOCALAPPDATA%\\stabar\\stabar.ini   (见 settings_path())
+托盘:   左键单击托盘图标 = 切换显示(小组件可以调到几乎看不见,托盘是稳定的入口)
+        右键托盘图标 = 显示/隐藏、立即刷新、鼠标穿透、退出
 """
 
 from __future__ import annotations
@@ -27,17 +29,19 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
     QVariantAnimation,
+    Signal,
 )
 from PySide6.QtGui import (
     QColor,
     QCursor,
     QFont,
     QFontMetricsF,
+    QIcon,
     QPainter,
     QPainterPath,
     QPen,
 )
-from PySide6.QtWidgets import QApplication, QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 # ======================================================================
 # 观感调节区:想让小组件更醒目,只动这一块(平时的不透明度在配置文件里)
@@ -65,6 +69,9 @@ ROW_H = 22
 PAD = 6
 GAP = 6
 EDGE_MARGIN = 24
+
+# --- 图标文件:托盘图标与 exe 文件图标共用这一份,见 icon_path() ---
+ICON_NAME = "stabar.ico"
 
 # HIT_AREA_ALPHA 不是装饰,是功能代码,别改成 0:
 # Windows 对分层窗口按像素做命中测试,alpha = 0 的像素鼠标会直接穿透到桌面。
@@ -188,6 +195,28 @@ def human_size(n: float) -> str:
 # ======================================================================
 
 
+def icon_path() -> Path:
+    """图标文件位置:开发时在项目目录,打包后在 PyInstaller 的解包目录。
+
+    打包后靠 stabar.spec 的 datas 把 .ico 带进 _internal,所以这里用 sys._MEIPASS 定位。
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return Path(base) / ICON_NAME
+    return Path(__file__).with_name(ICON_NAME)
+
+
+def make_tray_icon() -> QIcon:
+    """托盘图标:直接读 stabar.ico,与 exe 的文件图标同一份文件。"""
+    icon = QIcon(str(icon_path()))
+    if icon.isNull():
+        # .ico 要靠 Qt 的 qico.dll 插件解码,打包时漏掉就会走到这里:
+        # QIcon 不报错、只返回空图标,表现为托盘图标不出现,所以显式喊一声。
+        print(f"警告: 图标解码失败({icon_path()}),请检查打包是否漏了 qico.dll",
+              file=sys.stderr)
+    return icon
+
+
 class DiskBar(QWidget):
     """单行:盘符 + 占用进度条 + 百分比。不透明度由窗口统一下发。"""
 
@@ -239,7 +268,7 @@ class DiskBar(QWidget):
         self._warned = ratio >= floor
         return with_alpha(COLOR_WARN if self._warned else COLOR_ACCENT, self._alpha)
 
-    def paintEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
@@ -297,6 +326,8 @@ class DiskBar(QWidget):
 
 class StatusBarWindow(QWidget):
     """无标题条、无背景的置顶窗口,负责提亮 / 还原与位置持久化。"""
+
+    updated = Signal(str)  # 每次刷新后带出状态文字,供托盘图标的悬停提示使用
 
     def __init__(self) -> None:
         super().__init__()
@@ -377,7 +408,9 @@ class StatusBarWindow(QWidget):
     def refresh(self) -> None:
         for bar in self._bars:
             bar.reload()
-        self.setToolTip("\n".join(bar.detail_text() for bar in self._bars))
+        summary = "\n".join(bar.detail_text() for bar in self._bars)
+        self.setToolTip(summary)
+        self.updated.emit(summary)  # 托盘图标靠它同步悬停提示
         self._retarget()
 
     def _max_ratio(self) -> float:
@@ -415,39 +448,49 @@ class StatusBarWindow(QWidget):
             bar.set_alpha(alpha)
 
     # ---- 鼠标悬停唤醒:硬切,移开立即还原 ----
-    def enterEvent(self, event) -> None:  # noqa: N802
+    def enterEvent(self, event) -> None:
         self._hovered = True
         self._retarget(animate=False)
 
-    def leaveEvent(self, event) -> None:  # noqa: N802
+    def leaveEvent(self, event) -> None:
         self._hovered = False
         self._retarget(animate=False)
 
     # ---- 绘制:只画一层隐形矩形,让整个窗口都能接收鼠标 ----
-    def paintEvent(self, event) -> None:  # noqa: N802
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0, HIT_AREA_ALPHA))
 
+    # ---- 鼠标穿透:开启后事件直接落到桌面,不能拖动、不能悬停 ----
+    def set_click_through(self, enabled: bool) -> None:
+        """只能从托盘菜单关闭,所以别把它默认打开。"""
+        if bool(self.windowFlags() & Qt.WindowTransparentForInput) == enabled:
+            return
+        self.setWindowFlag(Qt.WindowTransparentForInput, enabled)
+        self.show()  # 改窗口标志会隐藏窗口,必须重新显示
+        self._hovered = False
+        self._retarget(animate=False)
+
     # ---- 拖动 ----
-    def mousePressEvent(self, event) -> None:  # noqa: N802
+    def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self._drag_offset = (
                 event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             )
             event.accept()
 
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+    def mouseMoveEvent(self, event) -> None:
         if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             event.accept()
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def mouseReleaseEvent(self, event) -> None:
         if self._drag_offset is not None:
             self._drag_offset = None
             self._save_position()
 
     # ---- 右键菜单:无标题条,刷新和退出都在这里 ----
-    def contextMenuEvent(self, event) -> None:  # noqa: N802
+    def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
         menu.addAction("立即刷新", self.refresh)
         menu.addSeparator()
@@ -461,12 +504,70 @@ class StatusBarWindow(QWidget):
         self._retarget(animate=False)
 
 
+class TrayIcon(QSystemTrayIcon):
+    """托盘图标:小组件可以调到几乎看不见,这里是唯一稳定的入口。"""
+
+    def __init__(self, window: StatusBarWindow) -> None:
+        super().__init__(make_tray_icon())
+        self._window = window
+        self.setToolTip(APP_NAME)
+
+        self._menu = QMenu()
+        self._visibility = self._menu.addAction("隐藏小组件", self._toggle_visible)
+        self._menu.addAction("立即刷新", window.refresh)
+
+        self._click_through = self._menu.addAction("鼠标穿透")
+        self._click_through.setCheckable(True)
+        self._click_through.toggled.connect(window.set_click_through)
+
+        self._menu.addSeparator()
+        self._menu.addAction("退出", QApplication.quit)
+        self._menu.aboutToShow.connect(self._sync_state)
+        self.setContextMenu(self._menu)
+
+        self.activated.connect(self._on_activated)
+        window.updated.connect(self.setToolTip)
+        # 窗口在托盘创建之前就 refresh 过一次,那次信号没人接,这里补上当前值
+        self.setToolTip(window.toolTip())
+
+    def _sync_state(self) -> None:
+        """菜单弹出前,把文字和勾选对齐到窗口的真实状态。"""
+        self._visibility.setText(
+            "隐藏小组件" if self._window.isVisible() else "显示小组件"
+        )
+        blocked = bool(self._window.windowFlags() & Qt.WindowTransparentForInput)
+        self._click_through.blockSignals(True)  # 否则会回环触发 set_click_through
+        self._click_through.setChecked(blocked)
+        self._click_through.blockSignals(False)
+
+    def _toggle_visible(self) -> None:
+        if self._window.isVisible():
+            self._window.hide()
+        else:
+            self._window.show()
+        self._sync_state()
+
+    def _on_activated(self, reason) -> None:
+        # 左键单击切换显示;右键是菜单,由系统直接弹出,不走这里
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._toggle_visible()
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     # QStandardPaths 靠应用名决定配置目录,必须在创建窗口(也就是读配置)之前设置
     app.setApplicationName(APP_NAME)
+    # 有托盘图标,隐藏小组件后程序要继续活着,不能因为窗口不可见就退出
+    app.setQuitOnLastWindowClosed(False)
+
     window = StatusBarWindow()
     window.show()
+
+    tray = None
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        tray = TrayIcon(window)
+        tray.show()
+
     return app.exec()
 
 

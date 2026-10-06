@@ -7,6 +7,7 @@
 |---|---|
 | `measure-resources.ps1` | 启动目标程序,从外部测量启动耗时、内存、CPU、线程/句柄 |
 | `bench-refresh-cost.py` | 进程内高精度拆解 CPU 成本(读数据 / refresh / 重绘) |
+| `make-icon.py` | 生成 `stabar.ico`(托盘与 exe 共用的图标,7 档尺寸的 PNG 条目) |
 | `readme.md` | 本文件:用法 + 检测结论 |
 
 ---
@@ -155,8 +156,19 @@ uv run python .\scripts\bench-refresh-cost.py
 - **配置文件里的键**:
   - `pos_x` / `pos_y`:窗口位置,拖动后自动写入
   - `idle_opacity`:平时前景不透明度。程序**启动时会把生效值回写**,所以打开文件就能看到
-    实际用的是多少。代价是回写之后 ini 成为权威值,再改代码里的 `IDLE_OPACITY` 不会生效
-    —— 想回到代码常量,把 ini 里那一行删掉即可。
+    实际用的是多少。代价是回写之后 ini 成为权威值,再改代码里的 `FIRST_RUN_IDLE_OPACITY`
+    不会生效 —— 想回到那个初值,把 ini 里那一行删掉即可。
   - 注意 `QSettings` 重写文件时**不保留注释**,别在 ini 里写说明。
+- **托盘图标**会让常驻工作集增加约 1.4 MB(图标 + 一个隐藏窗口):加托盘后实测
+  57.1 MB / 私有 23.8 MB / 线程 12 / 句柄 308。左键单击切换显示,右键出菜单,
+  悬停显示各盘明细。**鼠标穿透只能从托盘菜单关闭**,开启后窗口不再接收鼠标事件。
+- **图标只有一份文件 `stabar.ico`,托盘与 exe 共用**:图案设计写在 `scripts/make-icon.py`
+  的 `draw_icon_pixmap()` 里,由它生成 .ico;程序运行时托盘直接读这个文件(打包后从
+  `_internal\stabar.ico` 读,靠 `stabar.spec` 的 `datas` 带进包),exe 的文件图标嵌的也是
+  同一份。**改了图案要重新生成再打包**:
+  ```powershell
+  uv run python .\scripts\make-icon.py
+  uv run pyinstaller --noconfirm --clean stabar.spec
+  ```
 - 未采用 Nuitka。它的优势是防反编译和纯 Python 计算加速,对"Qt 巨库 + 每 15 秒读一次系统
   调用"的小组件没有收益,代价是需要配 C 工具链和分钟级构建。

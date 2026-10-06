@@ -89,10 +89,10 @@ DROP_BASENAMES = {
     "qdirect2d.dll",
     "qoffscreen.dll",
     "qminimal.dll",
-    # 图片格式插件:界面没有任何图片
+    # 图片格式插件:界面没有任何图片,所以只留 qico.dll ——
+    # 托盘图标是 .ico,Qt 靠它解码;删掉的话 QIcon 会静默返回空图标,托盘直接不出现
     "qgif.dll",
     "qicns.dll",
-    "qico.dll",
     "qjpeg.dll",
     "qpdf.dll",
     "qsvg.dll",
@@ -125,7 +125,8 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    # 托盘图标运行时读这个文件,所以要一起打进包里(_internal/stabar.ico)
+    datas=[(os.path.join(SPECPATH, "stabar.ico"), ".")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -155,6 +156,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=os.path.join(SPECPATH, "stabar.ico"),  # 由 scripts/make-icon.py 生成
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
