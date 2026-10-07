@@ -108,6 +108,7 @@ Quick/Qml/Pdf/Network/OpenGL/Svg、Mesa 软件 OpenGL 回退、Qt 翻译、图�
 main.py                          应用装配与界面:窗口、盘条、托盘、入口
 logging_setup.py                 日志:级别策略、落盘、Qt 消息桥接、异常钩子
 日志使用说明.md                  日志级别、位置、事件清单与自动化测试用法
+开发经验.md                      踩过的坑与实测结论(现象 → 原因 → 做法,标注证据来源)
 tests/                           pytest 用例(离屏 Qt,不碰真实配置与注册表)
 stabar.ico                       图标文件:托盘与 exe 共用(由 scripts/make-icon.py 生成)
 stabar.spec                      PyInstaller 规格:onedir + Qt 裁剪 + 嵌入图标
