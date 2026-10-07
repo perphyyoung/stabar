@@ -66,7 +66,10 @@ import logging_setup
 
 APP_NAME = "stabar"  # 决定打包后配置目录的名字
 DRIVES = ("C:/", "D:/")  # 要监控的盘符
-REFRESH_MS = 15_000  # 磁盘数据刷新间隔(毫秒)
+REFRESH_MS = 15_000  # 刷新间隔的默认值(毫秒);托盘菜单可改(见 refresh_seconds)
+REFRESH_MIN_S = 1  # 托盘步进器允许的最小秒数
+REFRESH_MAX_S = 60  # 托盘步进器允许的最大秒数
+REFRESH_DEFAULT_S = REFRESH_MS // 1000  # 首次运行的默认秒数(与历史行为一致)
 
 # --- 前景不透明度:文字、进度条、百分比同步生效 ---
 # 平时的值不在这里,而在配置文件里,也可以从托盘菜单的「透明度」滑杆改
@@ -513,7 +516,17 @@ class StatusBarWindow(QWidget):
         # 免得进程被强杀时这次回写丢掉。
         self._settings.setValue("idle_opacity", self._idle_opacity)
         self._settings.sync()
-        log.debug("event=config file=%s idle_opacity=%s", settings_path(), self._idle_opacity)
+        self._refresh_seconds = self._read_refresh_seconds()
+        self._saved_refresh_seconds = self._refresh_seconds
+        # 与 idle_opacity 一样回写:打开配置文件就能看到程序实际用的间隔
+        self._settings.setValue("refresh_seconds", self._refresh_seconds)
+        self._settings.sync()
+        log.debug(
+            "event=config file=%s idle_opacity=%s refresh_seconds=%d",
+            settings_path(),
+            self._idle_opacity,
+            self._refresh_seconds,
+        )
 
         self._bars: list[DiskBar] = []
         for i, path in enumerate(DRIVES):
@@ -532,7 +545,7 @@ class StatusBarWindow(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
-        self._timer.start(REFRESH_MS)
+        self._timer.start(self._refresh_seconds * 1000)
 
         self._apply_level(0.0)  # 先按最暗档铺一次,避免动画不触发时停留在全亮
         self.refresh()
@@ -586,6 +599,42 @@ class StatusBarWindow(QWidget):
         self._settings.sync()  # 立刻落盘:菜单里改完就断电也不该丢
         self._apply_level(self._level)
         log.info("event=idle_opacity value=%.2f", value)
+
+    def _read_refresh_seconds(self) -> int:
+        """读刷新间隔(秒)。配置里可以写任意整数,超出量程就夹取并留痕。"""
+        try:
+            value = int(self._settings.value("refresh_seconds", REFRESH_DEFAULT_S))
+        except (TypeError, ValueError):
+            log.warning("event=config_invalid key=refresh_seconds fallback=%d", REFRESH_DEFAULT_S)
+            return REFRESH_DEFAULT_S
+        clamped = min(REFRESH_MAX_S, max(REFRESH_MIN_S, value))
+        if clamped != value:
+            log.warning("event=config_clamped key=refresh_seconds value=%s used=%s", value, clamped)
+        return clamped
+
+    @property
+    def refresh_seconds(self) -> int:
+        """磁盘刷新间隔(秒;托盘步进器显示的就是它)。"""
+        return self._refresh_seconds
+
+    def preview_refresh_seconds(self, seconds: int) -> None:
+        """改动过程中立刻生效(下次读盘就按新间隔),**不落盘、不记日志**。"""
+        seconds = min(REFRESH_MAX_S, max(REFRESH_MIN_S, seconds))
+        if seconds == self._refresh_seconds:
+            return
+        self._refresh_seconds = seconds
+        self._timer.setInterval(seconds * 1000)
+
+    def set_refresh_seconds(self, seconds: int) -> None:
+        """提交刷新间隔:落盘 + 记一条 `event=refresh_interval`(菜单关闭 / 回车时调它)。"""
+        seconds = min(REFRESH_MAX_S, max(REFRESH_MIN_S, seconds))
+        self.preview_refresh_seconds(seconds)
+        if seconds == self._saved_refresh_seconds:
+            return  # 已经提交过同一个值,不重复写盘与记日志
+        self._saved_refresh_seconds = seconds
+        self._settings.setValue("refresh_seconds", seconds)
+        self._settings.sync()
+        log.info("event=refresh_interval seconds=%d", seconds)
 
     def _restore_position(self) -> None:
         x = self._settings.value("pos_x")
@@ -758,7 +807,9 @@ class TrayIcon(QSystemTrayIcon):
         self._visibility = self._menu.addAction("隐藏", self._toggle_visible)
         self._menu.addAction("立即刷新", window.refresh)
 
-        # 平时的不透明度:一行滑杆(位置由这里的调用点决定:紧跟"立即刷新")
+        # 两行控件(位置由这里的调用点决定):刷新频率紧跟"立即刷新"(同类功能放一起),
+        # 透明度排在它后面,再往后才是勾选项
+        self._add_refresh_row(window)
         self._add_opacity_row(window)
 
         self._click_through = self._menu.addAction("鼠标穿透")
@@ -793,6 +844,11 @@ class TrayIcon(QSystemTrayIcon):
         self._opacity_slider.blockSignals(False)
         self._opacity_value.setText(percent_text(self._window.idle_opacity))
 
+        # 步进器同理:对齐到生效值,且不反过来触发预览
+        self._refresh_spin.blockSignals(True)
+        self._refresh_spin.setValue(self._window.refresh_seconds)
+        self._refresh_spin.blockSignals(False)
+
         blocked = bool(self._window.windowFlags() & Qt.WindowTransparentForInput)
         self._click_through.blockSignals(True)  # 否则会回环触发 set_click_through
         self._click_through.setChecked(blocked)
@@ -802,40 +858,75 @@ class TrayIcon(QSystemTrayIcon):
         self._autostart.setChecked(is_autostart_enabled())
         self._autostart.blockSignals(False)
 
-    def _add_opacity_row(self, window: StatusBarWindow) -> None:
-        """在菜单里插一行「透明度」滑杆(未报警时的不透明度)。
+    def _add_row(
+        self, label: str, widget: QWidget, name: str, trailing: QWidget | None = None
+    ) -> None:
+        """在菜单里插一行「标签 + 控件(+ 尾随标签)」,滑杆与步进器共用。
 
-        用官方机制 `QWidgetAction` + `setDefaultWidget` 把控件放进菜单。**实测**:菜单 popup 里
-        控件能收到 press / move / release,真鼠标按住拖动确实改值,菜单也不会被按下就关掉。
-
-        拖动期间只预览,松手 / 菜单关闭时才提交落盘(见 `_commit_opacity`)。
+        左边距必须是 `MENU_ITEM_INDENT`:控件行没有菜单项那段缩进,不补上会比其它行更靠左
+        (实测:菜单项文字从菜单面板边缘 27px 处开始)。控件用官方机制 `QWidgetAction` +
+        `setDefaultWidget` 放进菜单。
         """
         holder = QWidget(self._menu)
         layout = QHBoxLayout(holder)
-        layout.setContentsMargins(MENU_ITEM_INDENT, 4, 10, 4)  # 左边距补上菜单项那段缩进
+        layout.setContentsMargins(MENU_ITEM_INDENT, 4, 10, 4)
         layout.setSpacing(8)
+        layout.addWidget(QLabel(label, holder))
+        # 顶住:标签贴左、控件贴右 —— 各行宽度被 QWidgetAction 拉齐后,右边缘因此必然对齐
+        layout.addStretch(1)
+        layout.addWidget(widget)
+        if trailing is not None:
+            layout.addWidget(trailing)
 
-        self._opacity_slider = QSlider(Qt.Horizontal, holder)
+        action = QWidgetAction(self._menu)
+        action.setText(name)  # 控件行本身没有文字,给 action 一个名字便于断言与调试
+        action.setDefaultWidget(holder)
+        self._menu.addAction(action)  # 插在哪由 __init__ 里的调用点决定
+
+    def _add_opacity_row(self, window: StatusBarWindow) -> None:
+        """一行「透明度」滑杆(未报警时的不透明度)。
+
+        **实测**:菜单 popup 里控件能收到 press / move / release,真鼠标按住拖动确实改值,
+        菜单也不会被按下就关掉。拖动期间只预览,松手 / 菜单关闭时才提交落盘。
+        """
+        self._opacity_slider = QSlider(Qt.Horizontal, self._menu)
         # 一格 = OPACITY_STEP(5%),量程就是配置允许的整个区间(5% ~ 100%)
         self._opacity_slider.setRange(1, OPACITY_STEPS)
         self._opacity_slider.setValue(opacity_units(window.idle_opacity))
         self._opacity_slider.setMinimumWidth(SLIDER_WIDTH)
         self._opacity_slider.setToolTip("未报警时的前景不透明度")
-        self._opacity_value = QLabel(percent_text(window.idle_opacity), holder)
+        self._opacity_value = QLabel(percent_text(window.idle_opacity), self._menu)
         self._opacity_value.setMinimumWidth(36)
+        # 文字也贴右:否则数字左对齐,看着比步进器的右边缘短一截
+        self._opacity_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
 
-        layout.addWidget(QLabel("透明度", holder))
-        layout.addWidget(self._opacity_slider)
-        layout.addWidget(self._opacity_value)
-
-        action = QWidgetAction(self._menu)
-        action.setText("透明度")  # 控件行本身没有文字,给 action 一个名字便于断言与调试
-        action.setDefaultWidget(holder)
-        self._menu.addAction(action)  # 插在哪由 __init__ 里的调用点决定
+        self._add_row("透明度", self._opacity_slider, "透明度", self._opacity_value)
 
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self._opacity_slider.sliderReleased.connect(self._commit_opacity)
         self._menu.aboutToHide.connect(self._commit_opacity)  # 拖到一半直接点别处也算提交
+
+    def _add_refresh_row(self, window: StatusBarWindow) -> None:
+        """一行「刷新频率（秒）」步进器:1 ~ 60 秒、步进 1、可直接点进去敲数字。
+
+        单位写在行标签上,步进器本身不带后缀 —— 免得同一个单位在菜单里出现两次。
+        """
+        self._refresh_spin = QSpinBox(self._menu)
+        self._refresh_spin.setRange(REFRESH_MIN_S, REFRESH_MAX_S)
+        self._refresh_spin.setSingleStep(1)
+        self._refresh_spin.setFixedWidth(72)
+        # 敲 "30" 时别在敲到 "3" 的那一刻就把间隔改成 3 秒
+        self._refresh_spin.setKeyboardTracking(False)
+        self._refresh_spin.setValue(window.refresh_seconds)
+        self._refresh_spin.setToolTip("每几秒读一次磁盘占用")
+
+        self._add_row("刷新频率（秒）", self._refresh_spin, "刷新频率")
+
+        self._refresh_spin.valueChanged.connect(self._on_refresh_changed)
+        self._refresh_spin.editingFinished.connect(self._commit_refresh)
+        self._menu.aboutToHide.connect(self._commit_refresh)
 
     def _on_opacity_changed(self, step: int) -> None:
         """拖动过程中:只预览,不落盘(拖一次会发几十个信号)。"""
@@ -846,6 +937,14 @@ class TrayIcon(QSystemTrayIcon):
     def _commit_opacity(self) -> None:
         """松手 / 菜单关闭:提交(落盘 + 一条 `event=idle_opacity`);同一个值重复提交会被去重。"""
         self._window.set_idle_opacity(opacity_from_step(self._opacity_slider.value()))
+
+    def _on_refresh_changed(self, seconds: int) -> None:
+        """改动过程中:立刻生效(下次读盘按新间隔),不落盘、不记日志。"""
+        self._window.preview_refresh_seconds(seconds)
+
+    def _commit_refresh(self) -> None:
+        """回车 / 菜单关闭:提交(落盘 + 一条 `event=refresh_interval`);同一个值会被去重。"""
+        self._window.set_refresh_seconds(self._refresh_spin.value())
 
     def _set_autostart(self, enabled: bool) -> None:
         try:

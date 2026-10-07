@@ -30,6 +30,19 @@ def test_hover_details_cover_the_whole_window(window) -> None:
     assert all(bar.testAttribute(Qt.WA_TransparentForMouseEvents) for bar in window._bars)
 
 
+def test_refresh_seconds_config_is_clamped(window, events) -> None:
+    """配置里的刷新秒数生效;超出量程就夹取到步进器的范围并留痕(与 idle_opacity 同一套规则)。"""
+    window._settings.setValue("refresh_seconds", 600)
+    window._settings.sync()
+    assert window._read_refresh_seconds() == main.REFRESH_MAX_S
+
+    window._settings.setValue("refresh_seconds", "abc")
+    assert window._read_refresh_seconds() == main.REFRESH_DEFAULT_S
+
+    assert any("event=config_clamped key=refresh_seconds" in e for e in events())
+    assert any("event=config_invalid key=refresh_seconds" in e for e in events())
+
+
 def test_hover_is_instant_and_reverts_instantly(window, events) -> None:
     """悬停是硬切:同一 tick 就到位,移开立即回落,不经过动画。
 

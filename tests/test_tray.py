@@ -1,4 +1,4 @@
-"""TrayIcon:菜单内容与顺序、透明度滑杆、勾选联动、显示切换、提示文字。"""
+"""TrayIcon:菜单内容与顺序、透明度滑杆、刷新步进器、勾选联动、显示切换、提示文字。"""
 
 import pytest
 
@@ -10,17 +10,18 @@ def tray(window) -> main.TrayIcon:
     return main.TrayIcon(window)
 
 
-def saved_opacity_line(tmp_path) -> str:
-    """配置文件里那一行(真读文件,不读 QSettings 的缓存 —— "改了没生效"正是要防的事)。"""
+def saved_line(tmp_path, key: str) -> str:
+    """配置文件里以 `key` 开头的那一行(真读文件,不读 QSettings 的缓存)。"""
     text = (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
-    return next(line for line in text.splitlines() if line.startswith("idle_opacity"))
+    return next(line for line in text.splitlines() if line.startswith(key))
 
 
 def test_menu_items_and_order(tray) -> None:
     assert [action.text() for action in tray._menu.actions()] == [
         "隐藏",
         "立即刷新",
-        "透明度",  # 滑杆那一行(QWidgetAction;控件本身在屏幕上另有文字)
+        "刷新频率",  # 步进器那一行(QWidgetAction;控件本身在屏幕上另有文字)
+        "透明度",  # 滑杆那一行,同上
         "鼠标穿透",
         "开机自启",
         "",  # 分隔线
@@ -50,7 +51,7 @@ def test_context_reason_does_not_toggle(window, tray) -> None:
 
 
 def test_tooltip_follows_window_refresh(window, tray) -> None:
-    """托盘悬停提示跟着刷新走,不用等 15 秒定时器。"""
+    """托盘悬停提示跟着刷新走,不用等定时器。"""
     window.refresh()
     assert "已用" in tray.toolTip()
 
@@ -96,15 +97,47 @@ def test_hand_edited_value_rounds_into_slider(window, tray) -> None:
 def test_drag_previews_then_commit_persists(window, tray, tmp_path, events) -> None:
     """拖动只预览(不落盘),松手才提交;同一个值重复提交只记一条日志。"""
     tray._sync_state()
-    assert saved_opacity_line(tmp_path) == "idle_opacity=0.3"
+    assert saved_line(tmp_path, "idle_opacity") == "idle_opacity=0.3"
 
     tray._opacity_slider.setValue(14)  # 相当于把滑杆拖到第 14 格 = 70%
     assert tray._opacity_value.text() == "70%"
     assert window._bars[0]._alpha == pytest.approx(0.70 * 255)  # 立刻看得到
-    assert saved_opacity_line(tmp_path) == "idle_opacity=0.3"  # 但还没落盘
+    assert saved_line(tmp_path, "idle_opacity") == "idle_opacity=0.3"  # 但还没落盘
 
     tray._opacity_slider.sliderReleased.emit()  # 松手
-    assert saved_opacity_line(tmp_path) == "idle_opacity=0.7"  # 落盘的值没有浮点尾巴
+    assert saved_line(tmp_path, "idle_opacity") == "idle_opacity=0.7"  # 落盘的值没有浮点尾巴
 
     tray._commit_opacity()  # 菜单关闭时还会来一次
     assert [e for e in events() if "event=idle_opacity" in e] == ["event=idle_opacity value=0.70"]
+
+
+def test_refresh_spin_range_default_and_editable(tray, window) -> None:
+    """步进器:1 ~ 60 秒、步进 1、默认与历史行为一致(15 秒),并且可以直接编辑。"""
+    assert tray._refresh_spin.minimum() == main.REFRESH_MIN_S == 1
+    assert tray._refresh_spin.maximum() == main.REFRESH_MAX_S == 60
+    assert tray._refresh_spin.singleStep() == 1
+    assert tray._refresh_spin.value() == main.REFRESH_DEFAULT_S == 15
+    assert not tray._refresh_spin.isReadOnly()
+
+    window.set_refresh_seconds(30)
+    tray._sync_state()
+    assert tray._refresh_spin.value() == 30
+
+
+def test_refresh_spin_applies_then_persists(window, tray, tmp_path, events) -> None:
+    """改步进器:定时器立刻换间隔(不落盘),提交后写 ini 并记一条日志。"""
+    tray._sync_state()
+    assert window._timer.interval() == 15_000
+
+    tray._refresh_spin.setValue(30)
+    assert window.refresh_seconds == 30
+    assert window._timer.interval() == 30_000  # 立刻生效:下次读盘就按新间隔
+    assert saved_line(tmp_path, "refresh_seconds") == "refresh_seconds=15"  # 但还没落盘
+
+    tray._commit_refresh()
+    assert saved_line(tmp_path, "refresh_seconds") == "refresh_seconds=30"
+
+    tray._commit_refresh()  # 菜单关闭时还会来一次
+    assert [e for e in events() if "event=refresh_interval" in e] == [
+        "event=refresh_interval seconds=30"
+    ]
