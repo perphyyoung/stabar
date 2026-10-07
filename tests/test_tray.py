@@ -22,22 +22,24 @@ def test_menu_items_and_order(tray) -> None:
 
 
 def test_hide_text_follows_visibility(window, tray) -> None:
+    """菜单文字跟随窗口可见性;"真的隐藏了"由 `test_e2e_ui.py` 验证,这里只管文字。"""
     window.show()
     tray._sync_state()
     assert tray._visibility.text() == "隐藏"
 
-    tray._toggle_visible()
-    assert not window.isVisible()
+    window.hide_widget()
+    tray._sync_state()
     assert tray._visibility.text() == "显示"
 
 
-def test_left_click_toggles_but_right_click_does_not(window, tray) -> None:
-    window.show()
-    tray._on_activated(main.QSystemTrayIcon.ActivationReason.Trigger)
-    assert not window.isVisible()
+def test_context_reason_does_not_toggle(window, tray) -> None:
+    """右键托盘是弹菜单(由系统处理),不该走"切换显示"那条路。
 
+    左键单击真的会切换显示 —— 那是"信号 → 槽 → 窗口状态"的链路,归 `test_e2e_ui.py`。
+    """
+    window.show()
     tray._on_activated(main.QSystemTrayIcon.ActivationReason.Context)
-    assert not window.isVisible()
+    assert window.isVisible()
 
 
 def test_tooltip_follows_window_refresh(window, tray) -> None:

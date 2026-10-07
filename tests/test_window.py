@@ -1,6 +1,13 @@
-"""StatusBarWindow:提亮状态机、鼠标穿透、隐藏、命中层、配置回写与位置夹取。"""
+"""StatusBarWindow:提亮状态机、鼠标穿透、隐藏、命中层、配置回写与位置夹取。
+
+组件层验证:构造窗口 + 直接调用 / 派发事件就能验证的都放这里;
+必须跨对象走事件与信号链路的放 `test_e2e_ui.py`(见 AGENTS.md 的测试分层)。
+"""
 
 import pytest
+from e2e_support import assert_in_order  # 只借日志解析那半部分(见该模块说明)
+from PySide6.QtCore import QEvent
+from PySide6.QtWidgets import QApplication
 
 import main
 
@@ -11,12 +18,24 @@ def test_low_usage_keeps_configured_opacity(window) -> None:
     assert window._bars[0]._alpha == pytest.approx(main.FIRST_RUN_IDLE_OPACITY * 255)
 
 
-def test_hover_is_instant_and_reverts_instantly(window) -> None:
-    """悬停是硬切:同一 tick 就到位,移开立即回落,不经过动画。"""
-    window.enterEvent(None)
+def test_hover_is_instant_and_reverts_instantly(window, events) -> None:
+    """悬停是硬切:同一 tick 就到位,移开立即回落,不经过动画。
+
+    用真的 Enter / Leave 事件派发(不是直接调处理方法),顺带断言事件顺序 ——
+    这仍是"组件级"验证,所以留在本层;跨对象链路见 `test_e2e_ui.py`。
+    """
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Enter))
     assert window._bars[0]._alpha == pytest.approx(255)
-    window.leaveEvent(None)
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Leave))
     assert window._bars[0]._alpha == pytest.approx(main.FIRST_RUN_IDLE_OPACITY * 255)
+
+    assert_in_order(
+        events(),
+        "event=hover state=enter",
+        "event=reveal target=1.00 from=0.00 reason=hover",
+        "event=hover state=leave",
+        "event=reveal target=0.00 from=1.00 reason=usage",
+    )
 
 
 def test_high_usage_brightens_to_full(window, qtbot, monkeypatch) -> None:
@@ -26,12 +45,19 @@ def test_high_usage_brightens_to_full(window, qtbot, monkeypatch) -> None:
     qtbot.waitUntil(lambda: window._bars[0]._alpha == pytest.approx(255), timeout=3000)
 
 
-def test_click_through_toggles_window_flag(window) -> None:
+def test_click_through_toggles_flag_and_logs(window, events) -> None:
+    """穿透开关:标志和日志都要有 —— 开启后只能回托盘关,所以日志必须留痕。"""
     assert not bool(window.windowFlags() & main.Qt.WindowTransparentForInput)
+
     window.set_click_through(True)
     assert bool(window.windowFlags() & main.Qt.WindowTransparentForInput)
+
     window.set_click_through(False)
     assert not bool(window.windowFlags() & main.Qt.WindowTransparentForInput)
+
+    assert_in_order(
+        events(), "event=click_through enabled=True", "event=click_through enabled=False"
+    )
 
 
 def test_hide_widget_clears_hover_state(window) -> None:
