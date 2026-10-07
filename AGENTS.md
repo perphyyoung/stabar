@@ -13,6 +13,11 @@ ruff check           # 3. 复核
 uv run pytest -q     # 4. 跑测试
 ```
 
+- **命令串联一律用 `&&`,不要用 `;`**:前面失败就短路,不会在已经出错的仓库上继续往下跑
+  (`;` 会把真正的失败埋在后面的输出里)。本机 PowerShell 是 **7.6**,`&&` 可用;四步可以一行跑完:
+  ```powershell
+  ruff check --fix && ruff format && ruff check && uv run pytest -q
+  ```
 - `ruff format` 必须放在 `ruff check --fix` **之后**:自动修复可能重排代码,格式化要在最终
   形态上做,否则两者会互相推翻。
 - 测试在 `tests/`(`uv run pytest -q`),改完必须全过。它跑在离屏 Qt 上
