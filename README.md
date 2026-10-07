@@ -53,6 +53,24 @@ uv run python main.py
 其余参数(刷新间隔、提亮水位、警告线、配色、要监控的盘符)都在 `main.py` 顶部的
 "观感调节区"里。
 
+## 日志
+
+开发时 INFO、打包后 WARNING,用环境变量覆盖:
+
+```powershell
+$env:STABAR_LOG_LEVEL = "DEBUG"    # 排查用;大小写不敏感,重启进程才生效
+```
+
+日志文件与配置**同目录**(`stabar.log`),逐条 flush;超过约 1 MB 就**清空重写**,不产生
+历史文件(旧内容会丢,要留档就把 `logging_setup.LOG_MAX_BYTES` 调大)。事件行统一为
+`event=<名词> key=value ...`,一行一个事件,既给人看也当自动化测试的观察点。完整的事件
+清单、位置对照和测试用法见 [`日志使用说明.md`](日志使用说明.md)。
+
+实现在 `logging_setup.py`(从 `main.py` 拆出),日志相关改动只改那一个文件。
+
+打包成 `--noconsole` 后 `sys.stderr` 是 `None`,所以**不要用 `print(..., file=sys.stderr)`
+报错信息 —— 它会静默消失**,要写成日志。
+
 ## 打包
 
 ```powershell
@@ -87,7 +105,10 @@ Quick/Qml/Pdf/Network/OpenGL/Svg、Mesa 软件 OpenGL 回退、Qt 翻译、图�
 ## 目录结构
 
 ```
-main.py                          全部实现,单文件
+main.py                          应用装配与界面:窗口、盘条、托盘、入口
+logging_setup.py                 日志:级别策略、落盘、Qt 消息桥接、异常钩子
+日志使用说明.md                  日志级别、位置、事件清单与自动化测试用法
+tests/                           pytest 用例(离屏 Qt,不碰真实配置与注册表)
 stabar.ico                       图标文件:托盘与 exe 共用(由 scripts/make-icon.py 生成)
 stabar.spec                      PyInstaller 规格:onedir + Qt 裁剪 + 嵌入图标
 scripts/make-icon.py             图标设计 + 生成 stabar.ico
@@ -106,6 +127,8 @@ scripts/readme.md                检测脚本用法与检测结论
 - **`REVEAL_START` 是独立常量,不要再写成 `WARN_THRESHOLD - 某个 margin`。** 那个隐式加减
   会让"改警告线"同时挪动提亮起点,之前为此出现过"调了却不生效"的问题。
 - **文字必须带暗色描边**,否则浅色壁纸下白字会消失。
+- **不要用 `print(..., file=sys.stderr)` 报告问题**:打包成 `--noconsole` 后 `sys.stderr`
+  是 `None`,打印会静默消失。要写日志(`log.warning("event=...")`),它一定落在文件里。
 - **托盘是唯一稳定入口**:退出、隐藏、鼠标穿透都放在托盘菜单里,因为小组件可能被调到
   几乎看不见。
 

@@ -10,12 +10,16 @@
 打包:   uv run pyinstaller --noconfirm --clean stabar.spec   (产物在 dist\\stabar)
 配置:   开发时 = 项目目录下的 stabar.ini
         打包后 = %LOCALAPPDATA%\\stabar\\stabar.ini   (见 settings_path())
+日志:   与配置同目录的 stabar.log,开发 INFO、打包 WARNING,可用 STABAR_LOG_LEVEL 覆盖
+        (自动化测试用 DEBUG);实现见 logging_setup.py,用法见 日志使用说明.md
 托盘:   左键单击托盘图标 = 切换显示(小组件可以调到几乎看不见,托盘是稳定的入口)
         右键托盘图标 = 显示/隐藏、立即刷新、鼠标穿透、退出
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import shutil
 import sys
 import winreg
@@ -43,6 +47,8 @@ from PySide6.QtGui import (
     QPen,
 )
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
+
+import logging_setup
 
 # ======================================================================
 # 观感调节区:想让小组件更醒目,只动这一块(平时的不透明度在配置文件里)
@@ -90,6 +96,8 @@ SETTINGS_NAME = "stabar.ini"  # 实际位置见 settings_path(),开发与打包�
 # 只在配置文件里还没有 idle_opacity 这个键时生效(首次运行)。程序启动会把生效值回写,
 # 所以之后改这里不会有任何反应 —— 要调不透明度请直接改配置文件。
 FIRST_RUN_IDLE_OPACITY = 0.30
+# 覆盖配置与日志目录(日志实现见 logging_setup.py),自动化测试靠它做隔离
+CONFIG_DIR_ENV = "STABAR_CONFIG_DIR"
 
 # --- 色相 ---
 BASE_TEXT = (238, 238, 242)
@@ -105,19 +113,42 @@ COLOR_DANGER = (231, 92, 92)
 # ======================================================================
 
 
-def settings_path() -> Path:
-    """配置文件位置:开发时放项目目录,打包后放用户的配置目录。
+def config_dir() -> Path:
+    """配置与日志所在目录,优先级从高到低:
+
+    1. 环境变量 STABAR_CONFIG_DIR —— 自动化测试用:每次跑在临时目录里,不碰你真实的
+       配置和日志,测试也能直接读那一份日志;
+    2. 打包运行 -> %LOCALAPPDATA%\\stabar;
+    3. 源码运行 -> 项目目录,方便直接手改。
 
     开发时留在项目目录是为了方便直接手改;打包后不能再写 exe 旁边,原因有两个:
     一是 onedir 的 __file__ 指向 _internal 子目录,配置会藏进包内部、升级就丢;
     二是装到 Program Files 之类的路径下可能根本没有写权限。
+
+    第 2 条依赖 Qt 的应用名,所以调用方必须等 setApplicationName(APP_NAME) 之后再用
+    —— 应用名没设时 AppConfigLocation 会退化成 %LOCALAPPDATA% 本身(实测),日志就会和
+    配置分家。
     """
-    if getattr(sys, "frozen", False):  # PyInstaller 打包运行时的标志
+    override = os.environ.get(CONFIG_DIR_ENV)
+    if override:
+        directory = Path(override)
+    elif getattr(sys, "frozen", False):  # PyInstaller 打包运行时的标志
         base = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
         directory = Path(base) if base else Path.home() / f".{APP_NAME}"
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory / SETTINGS_NAME
-    return Path(__file__).with_name(SETTINGS_NAME)
+    else:
+        directory = Path(__file__).parent
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def settings_path() -> Path:
+    """配置文件位置。"""
+    return config_dir() / SETTINGS_NAME
+
+
+def log_path() -> Path:
+    """日志文件位置:与配置文件同目录,便于一起备份 / 清理。"""
+    return logging_setup.log_path(config_dir())
 
 
 def lerp(a: float, b: float, t: float) -> float:
@@ -167,6 +198,16 @@ def draw_outlined_text(
     pen.setWidthF(OUTLINE_WIDTH)
     painter.strokePath(path, pen)
     painter.fillPath(path, fill)
+
+
+# ======================================================================
+# 日志
+#
+# 实现全在 logging_setup.py(级别策略、落盘、Qt 消息桥接、异常钩子),这里只留一个
+# logger。事件行统一写成 "event=<名词> key=value ...",完整清单见 日志使用说明.md。
+# ======================================================================
+
+log = logging.getLogger(APP_NAME)
 
 
 # ======================================================================
@@ -257,7 +298,8 @@ def make_tray_icon() -> QIcon:
     if icon.isNull():
         # .ico 要靠 Qt 的 qico.dll 插件解码,打包时漏掉就会走到这里:
         # QIcon 不报错、只返回空图标,表现为托盘图标不出现,所以显式喊一声。
-        print(f"警告: 图标解码失败({icon_path()}),请检查打包是否漏了 qico.dll", file=sys.stderr)
+        # 这条必须是日志而不是 print:打包后 stderr 是 None,打印出去就没了。
+        log.warning("event=icon_missing path=%s hint=检查打包是否漏了 qico.dll", icon_path())
     return icon
 
 
@@ -394,6 +436,7 @@ class StatusBarWindow(QWidget):
         # 免得进程被强杀时这次回写丢掉。
         self._settings.setValue("idle_opacity", self._idle_opacity)
         self._settings.sync()
+        log.debug("event=config file=%s idle_opacity=%s", settings_path(), self._idle_opacity)
 
         self._bars: list[DiskBar] = []
         for i, path in enumerate(DRIVES):
@@ -419,8 +462,13 @@ class StatusBarWindow(QWidget):
         try:
             value = float(self._settings.value("idle_opacity", FIRST_RUN_IDLE_OPACITY))
         except (TypeError, ValueError):
+            log.warning("event=config_invalid key=idle_opacity fallback=%s", FIRST_RUN_IDLE_OPACITY)
             return FIRST_RUN_IDLE_OPACITY
-        return min(1.0, max(MIN_OPACITY, value))
+        clamped = min(1.0, max(MIN_OPACITY, value))
+        if clamped != value:
+            # 夹取会静默改写你写的值,是"调了却不生效"的经典来源,必须留痕
+            log.warning("event=config_clamped key=idle_opacity value=%s used=%s", value, clamped)
+        return clamped
 
     def _restore_position(self) -> None:
         x = self._settings.value("pos_x")
@@ -439,10 +487,12 @@ class StatusBarWindow(QWidget):
                 min(max(self.x(), area.left()), area.right() - self.width()),
                 min(max(self.y(), area.top()), area.bottom() - self.height()),
             )
+        log.debug("event=position x=%d y=%d", self.x(), self.y())
 
     def _save_position(self) -> None:
         self._settings.setValue("pos_x", self.x())
         self._settings.setValue("pos_y", self.y())
+        log.debug("event=position_saved x=%d y=%d", self.x(), self.y())
 
     # ---- 数据刷新 ----
     def refresh(self) -> None:
@@ -452,6 +502,14 @@ class StatusBarWindow(QWidget):
         self.setToolTip(summary)
         self.updated.emit(summary)  # 托盘图标靠它同步悬停提示
         self._retarget()
+        # target 是同步算出的终值(动画还在跑时它也已确定),所以断言提亮结果不必等动画
+        log.debug(
+            "event=refresh max_ratio=%.4f level=%.2f target=%.2f %s",
+            self._max_ratio(),
+            self._level,
+            self._target,
+            " | ".join(summary.split("\n")),
+        )
 
     def _max_ratio(self) -> float:
         ratios = [r for bar in self._bars if (r := bar.ratio()) is not None]
@@ -469,6 +527,12 @@ class StatusBarWindow(QWidget):
             return
         self._target = target
         self._anim.stop()
+        log.debug(
+            "event=reveal target=%.2f from=%.2f reason=%s",
+            target,
+            self._level,
+            "hover" if self._hovered else "usage",
+        )
         if not animate:
             self._apply_level(target)
             return
@@ -490,10 +554,12 @@ class StatusBarWindow(QWidget):
     # ---- 鼠标悬停唤醒:硬切,移开立即还原 ----
     def enterEvent(self, event) -> None:
         self._hovered = True
+        log.debug("event=hover state=enter")
         self._retarget(animate=False)
 
     def leaveEvent(self, event) -> None:
         self._hovered = False
+        log.debug("event=hover state=leave")
         self._retarget(animate=False)
 
     # ---- 绘制:只画一层隐形矩形,让整个窗口都能接收鼠标 ----
@@ -510,6 +576,8 @@ class StatusBarWindow(QWidget):
         self.show()  # 改窗口标志会隐藏窗口,必须重新显示
         self._hovered = False
         self._retarget(animate=False)
+        # 开启后只能从托盘关掉,日志里必须留下这一笔,否则"窗口怎么点都没反应"查不出来
+        log.info("event=click_through enabled=%s", enabled)
 
     # ---- 隐藏:恢复入口只有托盘 ----
     def hide_widget(self) -> None:
@@ -517,6 +585,7 @@ class StatusBarWindow(QWidget):
         self._hovered = False
         self._retarget(animate=False)
         self.hide()
+        log.info("event=window state=hidden")
 
     # ---- 拖动 ----
     def mousePressEvent(self, event) -> None:
@@ -541,6 +610,9 @@ class StatusBarWindow(QWidget):
         menu.addAction("立即刷新", self.refresh)
         menu.addSeparator()
         menu.addAction("退出", QApplication.quit)
+        log.debug("event=menu open=context")
+        # 记下选中的是哪一项:它是"谁把窗口藏了/把穿透开了"的唯一证据
+        menu.triggered.connect(lambda action: log.info("event=menu item=%s", action.text()))
         menu.exec(event.globalPos())
 
         # 菜单是 popup,弹出期间窗口收不到 enter / leave 事件。
@@ -596,14 +668,18 @@ class TrayIcon(QSystemTrayIcon):
         try:
             set_autostart(enabled)
         except OSError as error:
-            print(f"警告: 设置开机自启失败:{error}", file=sys.stderr)
+            # 不要用 print(file=sys.stderr):打包成 --noconsole 后它是 None,打印会静默消失
+            log.warning("event=autostart enabled=%s ok=0 error=%s", enabled, error)
+        else:
+            log.info("event=autostart enabled=%s ok=1", enabled)
         self._sync_state()  # 以注册表的实际结果为准,别让勾选状态骗人
 
     def _toggle_visible(self) -> None:
         if self._window.isVisible():
-            self._window.hide_widget()
+            self._window.hide_widget()  # 内部会记 event=window state=hidden
         else:
             self._window.show()
+            log.info("event=window state=shown")
         self._sync_state()
 
     def _on_activated(self, reason) -> None:
@@ -614,19 +690,39 @@ class TrayIcon(QSystemTrayIcon):
 
 def main() -> int:
     app = QApplication(sys.argv)
-    # QStandardPaths 靠应用名决定配置目录,必须在创建窗口(也就是读配置)之前设置
+    # QStandardPaths 靠应用名决定配置目录,必须在创建窗口(也就是读配置)之前设置。
+    # 日志目录同样由它算出,所以 setup_logging() 也必须排在这一行之后 ——
+    # 实测:应用名没设时 AppConfigLocation 会退化成 %LOCALAPPDATA% 本身,日志就跟配置分家了。
     app.setApplicationName(APP_NAME)
+    level = logging_setup.setup_logging(config_dir(), APP_NAME)
+    log.info(
+        "event=start frozen=%s level=%s config=%s log=%s drives=%s",
+        bool(getattr(sys, "frozen", False)),
+        logging.getLevelName(level),
+        settings_path(),
+        log_path(),
+        ",".join(DRIVES),
+    )
+    # 打包成 --noconsole 后 stderr 是 None:先记下来,省得以后怀疑日志缺了控制台那一半
+    log.debug("event=start stderr=%s", "none" if sys.stderr is None else "available")
+
     # 有托盘图标,隐藏小组件后程序要继续活着,不能因为窗口不可见就退出
     app.setQuitOnLastWindowClosed(False)
 
     window = StatusBarWindow()
     window.show()
+    log.info("event=window state=shown pos=%d,%d", window.x(), window.y())
 
     tray = None
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = TrayIcon(window)
         tray.show()
+        log.info("event=tray state=created")
+    else:
+        # 托盘是隐藏 / 穿透之后唯一的恢复入口,没有它小组件藏起来就找不回来了
+        log.warning("event=tray state=unavailable hint=隐藏后将无法从托盘恢复")
 
+    app.aboutToQuit.connect(lambda: log.info("event=stop"))
     return app.exec()
 
 

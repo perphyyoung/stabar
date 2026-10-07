@@ -15,8 +15,10 @@ dist/
 *.spec
 !stabar.spec
 
-# 运行时生成的配置(窗口位置、透明度)
+# 运行时生成的配置与日志(位置随运行方式变化,见 日志使用说明.md)
+# 日志只有一份:超限是清空重写,不产生 stabar.log.1 之类的历史文件
 stabar.ini
+stabar.log
 
 # 编辑器与系统
 .idea/

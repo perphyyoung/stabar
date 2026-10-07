@@ -28,6 +28,14 @@ uv run pytest -q     # 4. 跑测试
   `[tool.ruff.lint.pep8-naming]` 的 `extend-ignore-names` 里集中豁免。
   **不要写行内 `# noqa`**;新增 Qt 重写方法就把名字加进那份白名单。
 
+## 模块划分
+
+- **`main.py` 只放应用装配与界面**(窗口、盘条、托盘、入口),基础设施不要往里塞。
+  已经拆出去的:日志 → `logging_setup.py`。
+- 后续同类需求(配置读写、资源测量……)同样独立成模块,并在 `README.md` 的目录结构里登记。
+- 测试跟着模块走:测日志基础设施就在 `tests/test_logging.py` 里直接 `import logging_setup`,
+  不要绕道 `main` 拿。
+
 ## 提交信息:默认单行
 
 - **默认单行**,一句话说清做了什么。非必要不写多行正文。
