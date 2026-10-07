@@ -20,6 +20,12 @@ uv run pytest -q     # 4. 跑测试
   **不碰真实 `stabar.ini` 和真实 Run 键**。
 - 收尾标准:`ruff check` 输出 `All checks passed!`,`ruff format --check` 输出
   `already formatted`。
+- **两层 E2E**,断言一律"日志事件序列 + 一条外部事实"配对(见 `日志使用说明.md` 第七节):
+  - **A 层** `tests/test_e2e_ui.py`:进程内驱动真实事件,默认跑,不动鼠标;
+  - **B 层** `tests/test_e2e_real_input.py`:进程外真鼠标驱动**打包后的 exe**,**默认跳过**。
+    手动开启:`uv run pyinstaller --noconfirm --clean stabar.spec` → `$env:STABAR_E2E = "1"`。
+    它会真的移动鼠标、抢焦点,必须有真实桌面会话;检测到你在用鼠标时会 **skip 而不是判失败**。
+- 临时脚本一律以 `tmp-` 开头(已在 `.gitignore` 里),用完即删,不要留在仓库里。
 - **不要配 format on save**:格式化只走命令行,避免编辑器与 agent 的改动互相打架。
 - 配置都在 `pyproject.toml`:`line-length = 100`;`[tool.ruff.lint]` 的
   `extend-select = ["I", "N"]`(import 排序 + 命名规范)。用 `extend` 而不是 `select`,

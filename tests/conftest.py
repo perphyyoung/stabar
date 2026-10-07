@@ -1,6 +1,8 @@
 """pytest 公共设施:离屏跑 Qt,并且绝不碰真实配置与真实注册表。"""
 
+import logging
 import os
+import sys
 
 import pytest
 
@@ -85,3 +87,41 @@ def window(qtbot, tmp_path, monkeypatch, low_usage, fake_registry):
     window = main.StatusBarWindow()
     qtbot.addWidget(window)
     return window
+
+
+@pytest.fixture
+def app_log(tmp_path, monkeypatch):
+    """把配置目录与日志都落到 tmp,并在结束后还原 logging 状态。
+
+    还原是必须的:`setup_logging()` 用的是 `basicConfig(force=True)`,会顶掉 pytest 自己的
+    处理器;文件句柄也要关掉,否则 Windows 上 tmp 目录删不掉。
+    """
+    import logging_setup
+    import main
+
+    monkeypatch.setenv(main.CONFIG_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(logging_setup.LOG_LEVEL_ENV, "DEBUG")  # 测试默认看全部事件
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)  # 让被改写的钩子自动回滚
+
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+
+    logging_setup.setup_logging(tmp_path, main.APP_NAME)
+    yield tmp_path / logging_setup.LOG_NAME
+
+    for handler in root.handlers:
+        if handler not in saved_handlers:
+            handler.close()
+    root.handlers[:] = saved_handlers
+    root.setLevel(saved_level)
+    logging_setup.qInstallMessageHandler(None)
+    logging_setup._qt_bridge = None
+
+
+@pytest.fixture
+def events(app_log):
+    """把日志读成事件行列表;每次调用重新读,便于在动作之间取最新的那一段。"""
+    from e2e_support import read_events
+
+    return lambda: read_events(app_log)

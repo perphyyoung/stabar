@@ -20,6 +20,9 @@ dist/
 stabar.ini
 stabar.log
 
+# 临时脚本与临时目录:约定以 tmp- 开头,用完即删,不要提交
+tmp-*
+
 # 编辑器与系统
 .idea/
 .vscode/
