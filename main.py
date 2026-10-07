@@ -804,8 +804,13 @@ class TrayIcon(QSystemTrayIcon):
         self.setToolTip(APP_NAME)
 
         self._menu = QMenu()
+        # 菜单项默认**不**显示提示(QMenu::toolTipsVisible 默认 false),要显式打开;
+        # 文字来自每个 QAction 自己的 setToolTip —— 没设的项,开了也没有提示可显示
+        self._menu.setToolTipsVisible(True)
+
         self._visibility = self._menu.addAction("隐藏", self._toggle_visible)
-        self._menu.addAction("立即刷新", window.refresh)
+        self._visibility.setToolTip("显示 / 隐藏小组件(隐藏后只能从托盘恢复)")
+        self._menu.addAction("立即刷新", window.refresh).setToolTip("立刻读一次磁盘占用")
 
         # 两行控件(位置由这里的调用点决定):刷新频率紧跟"立即刷新"(同类功能放一起),
         # 透明度排在它后面,再往后才是勾选项
@@ -814,14 +819,16 @@ class TrayIcon(QSystemTrayIcon):
 
         self._click_through = self._menu.addAction("鼠标穿透")
         self._click_through.setCheckable(True)
+        self._click_through.setToolTip("开启后窗口不再接收鼠标,只能从本菜单关掉")
         self._click_through.toggled.connect(window.set_click_through)
 
         self._autostart = self._menu.addAction("开机自启")
         self._autostart.setCheckable(True)
+        self._autostart.setToolTip("写当前用户的注册表 Run 键,可回本菜单取消")
         self._autostart.toggled.connect(self._set_autostart)
 
         self._menu.addSeparator()
-        self._menu.addAction("退出", QApplication.quit)
+        self._menu.addAction("退出", QApplication.quit).setToolTip("退出 stabar")
         self._menu.aboutToShow.connect(self._sync_state)
         # 托盘菜单弹出的唯一留痕:真右键托盘图标时只有它能证明"点击真的到了图标上"
         self._menu.aboutToShow.connect(lambda: log.debug("event=menu open=tray"))
@@ -859,27 +866,43 @@ class TrayIcon(QSystemTrayIcon):
         self._autostart.blockSignals(False)
 
     def _add_row(
-        self, label: str, widget: QWidget, name: str, trailing: QWidget | None = None
+        self,
+        label: str,
+        widget: QWidget,
+        name: str,
+        tooltip: str,
+        trailing: QWidget | None = None,
     ) -> None:
         """在菜单里插一行「标签 + 控件(+ 尾随标签)」,滑杆与步进器共用。
 
         左边距必须是 `MENU_ITEM_INDENT`:控件行没有菜单项那段缩进,不补上会比其它行更靠左
         (实测:菜单项文字从菜单面板边缘 27px 处开始)。控件用官方机制 `QWidgetAction` +
         `setDefaultWidget` 放进菜单。
+
+        提示文字同时挂在 action、行容器与控件上:菜单项提示要求 action 有 tooltip(且菜单开了
+        `toolTipsVisible`),而指针落在行内的标签上时归属的是行容器 —— 标签与尾随标签都不接收
+        鼠标事件,所以**整行任意位置**都是同一句提示。
         """
         holder = QWidget(self._menu)
         layout = QHBoxLayout(holder)
         layout.setContentsMargins(MENU_ITEM_INDENT, 4, 10, 4)
         layout.setSpacing(8)
-        layout.addWidget(QLabel(label, holder))
+
+        title = QLabel(label, holder)
+        title.setAttribute(Qt.WA_TransparentForMouseEvents)
+        layout.addWidget(title)
         # 顶住:标签贴左、控件贴右 —— 各行宽度被 QWidgetAction 拉齐后,右边缘因此必然对齐
         layout.addStretch(1)
+        widget.setToolTip(tooltip)
         layout.addWidget(widget)
         if trailing is not None:
+            trailing.setAttribute(Qt.WA_TransparentForMouseEvents)
             layout.addWidget(trailing)
 
+        holder.setToolTip(tooltip)
         action = QWidgetAction(self._menu)
         action.setText(name)  # 控件行本身没有文字,给 action 一个名字便于断言与调试
+        action.setToolTip(tooltip)
         action.setDefaultWidget(holder)
         self._menu.addAction(action)  # 插在哪由 __init__ 里的调用点决定
 
@@ -894,7 +917,6 @@ class TrayIcon(QSystemTrayIcon):
         self._opacity_slider.setRange(1, OPACITY_STEPS)
         self._opacity_slider.setValue(opacity_units(window.idle_opacity))
         self._opacity_slider.setMinimumWidth(SLIDER_WIDTH)
-        self._opacity_slider.setToolTip("未报警时的前景不透明度")
         self._opacity_value = QLabel(percent_text(window.idle_opacity), self._menu)
         self._opacity_value.setMinimumWidth(36)
         # 文字也贴右:否则数字左对齐,看着比步进器的右边缘短一截
@@ -902,7 +924,9 @@ class TrayIcon(QSystemTrayIcon):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
 
-        self._add_row("透明度", self._opacity_slider, "透明度", self._opacity_value)
+        self._add_row(
+            "透明度", self._opacity_slider, "透明度", "未报警时的前景不透明度", self._opacity_value
+        )
 
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self._opacity_slider.sliderReleased.connect(self._commit_opacity)
@@ -920,9 +944,8 @@ class TrayIcon(QSystemTrayIcon):
         # 敲 "30" 时别在敲到 "3" 的那一刻就把间隔改成 3 秒
         self._refresh_spin.setKeyboardTracking(False)
         self._refresh_spin.setValue(window.refresh_seconds)
-        self._refresh_spin.setToolTip("每几秒读一次磁盘占用")
 
-        self._add_row("刷新频率（秒）", self._refresh_spin, "刷新频率")
+        self._add_row("刷新频率（秒）", self._refresh_spin, "刷新频率", "每几秒读一次磁盘占用")
 
         self._refresh_spin.valueChanged.connect(self._on_refresh_changed)
         self._refresh_spin.editingFinished.connect(self._commit_refresh)

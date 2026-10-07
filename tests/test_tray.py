@@ -1,6 +1,8 @@
 """TrayIcon:菜单内容与顺序、透明度滑杆、刷新步进器、勾选联动、显示切换、提示文字。"""
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLabel
 
 import main
 
@@ -141,3 +143,24 @@ def test_refresh_spin_applies_then_persists(window, tray, tmp_path, events) -> N
     assert [e for e in events() if "event=refresh_interval" in e] == [
         "event=refresh_interval seconds=30"
     ]
+
+
+def test_every_item_shows_a_hover_tooltip(tray) -> None:
+    """整个右键菜单每一项都有 hover 提示。
+
+    Qt 的 `QMenu` **默认不显示**菜单项提示(`toolTipsVisible` 默认 false),文字又必须挂在
+    `QAction` 上 —— 所以控件行之外的那些项以前是没有提示可显示的。
+    """
+    assert tray._menu.toolTipsVisible()
+    assert [a.text() for a in tray._menu.actions() if a.text() and not a.toolTip()] == []
+
+    # 控件行:提示同时挂在 action / 行容器 / 控件上,行内标签又不拦鼠标 → 整行任意位置都有提示
+    for widget in (tray._refresh_spin, tray._opacity_slider):
+        row = widget.parentWidget()
+        assert widget.toolTip() and row.toolTip() == widget.toolTip()
+        assert all(
+            label.testAttribute(Qt.WA_TransparentForMouseEvents)
+            for label in row.findChildren(QLabel)
+        )
+    action = next(a for a in tray._menu.actions() if a.text() == "刷新频率")
+    assert action.toolTip() == tray._refresh_spin.toolTip()
