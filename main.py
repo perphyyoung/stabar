@@ -516,6 +516,13 @@ class StatusBarWindow(QWidget):
         self._hovered = False
         self._retarget(animate=False)
 
+    # ---- 隐藏:恢复入口只有托盘 ----
+    def hide_widget(self) -> None:
+        """隐藏小组件,并把悬停态清干净 —— 否则下次显示出来会停在全亮。"""
+        self._hovered = False
+        self._retarget(animate=False)
+        self.hide()
+
     # ---- 拖动 ----
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -534,9 +541,10 @@ class StatusBarWindow(QWidget):
             self._drag_offset = None
             self._save_position()
 
-    # ---- 右键菜单:无标题条,刷新和退出都在这里 ----
+    # ---- 右键菜单:无标题条,隐藏 / 刷新 / 退出都在这里 ----
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
+        menu.addAction("隐藏", self.hide_widget)
         menu.addAction("立即刷新", self.refresh)
         menu.addSeparator()
         menu.addAction("退出", QApplication.quit)
@@ -558,7 +566,7 @@ class TrayIcon(QSystemTrayIcon):
         self.setToolTip(APP_NAME)
 
         self._menu = QMenu()
-        self._visibility = self._menu.addAction("隐藏小组件", self._toggle_visible)
+        self._visibility = self._menu.addAction("隐藏", self._toggle_visible)
         self._menu.addAction("立即刷新", window.refresh)
 
         self._click_through = self._menu.addAction("鼠标穿透")
@@ -581,9 +589,7 @@ class TrayIcon(QSystemTrayIcon):
 
     def _sync_state(self) -> None:
         """菜单弹出前,把文字和勾选对齐到窗口的真实状态。"""
-        self._visibility.setText(
-            "隐藏小组件" if self._window.isVisible() else "显示小组件"
-        )
+        self._visibility.setText("隐藏" if self._window.isVisible() else "显示")
         blocked = bool(self._window.windowFlags() & Qt.WindowTransparentForInput)
         self._click_through.blockSignals(True)  # 否则会回环触发 set_click_through
         self._click_through.setChecked(blocked)
@@ -602,7 +608,7 @@ class TrayIcon(QSystemTrayIcon):
 
     def _toggle_visible(self) -> None:
         if self._window.isVisible():
-            self._window.hide()
+            self._window.hide_widget()
         else:
             self._window.show()
         self._sync_state()
