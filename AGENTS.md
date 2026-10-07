@@ -10,10 +10,14 @@
 ruff check --fix     # 1. 修可自动修的问题(含 import 排序)
 ruff format          # 2. 统一格式
 ruff check           # 3. 复核
+uv run pytest -q     # 4. 跑测试
 ```
 
 - `ruff format` 必须放在 `ruff check --fix` **之后**:自动修复可能重排代码,格式化要在最终
   形态上做,否则两者会互相推翻。
+- 测试在 `tests/`(`uv run pytest -q`),改完必须全过。它跑在离屏 Qt 上
+  (`QT_QPA_PLATFORM=offscreen`),不会弹真窗口;配置走 `tmp_path`、注册表用替身,
+  **不碰真实 `stabar.ini` 和真实 Run 键**。
 - 收尾标准:`ruff check` 输出 `All checks passed!`,`ruff format --check` 输出
   `already formatted`。
 - **不要配 format on save**:格式化只走命令行,避免编辑器与 agent 的改动互相打架。
