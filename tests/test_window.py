@@ -6,7 +6,7 @@
 
 import pytest
 from e2e_support import assert_in_order  # 只借日志解析那半部分(见该模块说明)
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication
 
 import main
@@ -16,6 +16,18 @@ def test_low_usage_keeps_configured_opacity(window) -> None:
     """低占用时严格按配置的不透明度显示,提亮完全不介入。"""
     assert window._level == 0.0
     assert window._bars[0]._alpha == pytest.approx(main.FIRST_RUN_IDLE_OPACITY * 255)
+
+
+def test_hover_details_cover_the_whole_window(window) -> None:
+    """整块区域悬停都能出详情:窗口开 `WA_AlwaysShowToolTips`,盘条不接收鼠标事件。
+
+    真人实测的"详情时有时无"来自两处:tooltip 默认只对活动窗口显示(本窗口置顶、从不被激活),
+    以及盘条铺满窗口挡住了挂在窗口上的详情。
+    """
+    assert window.testAttribute(Qt.WA_AlwaysShowToolTips)
+    assert window.toolTip()  # 详情文字挂在窗口上
+    assert window._bars
+    assert all(bar.testAttribute(Qt.WA_TransparentForMouseEvents) for bar in window._bars)
 
 
 def test_hover_is_instant_and_reverts_instantly(window, events) -> None:

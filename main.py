@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QSlider,
+    QSpinBox,
     QSystemTrayIcon,
     QWidget,
     QWidgetAction,
@@ -487,6 +488,9 @@ class StatusBarWindow(QWidget):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        # Qt 文档:tooltip 默认只对**活动窗口**显示,而本窗口置顶、从不被激活(真人实测:
+        # 详情会时有时无甚至一直不出现)。开了这条,非活动窗口也照常弹详情。
+        self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.setFixedSize(
             WINDOW_W,
             PAD * 2 + ROW_H * len(DRIVES) + GAP * (len(DRIVES) - 1),
@@ -515,6 +519,10 @@ class StatusBarWindow(QWidget):
         for i, path in enumerate(DRIVES):
             bar = DiskBar(path, self)
             bar.setGeometry(PAD, PAD + i * (ROW_H + GAP), WINDOW_W - PAD * 2, ROW_H)
+            # 详情文字挂在**窗口**上,而盘条铺满整块区域、自己又不处理 tooltip —— 不给它设这个,
+            # 悬停在盘条上时那条 tooltip 就归盘条(它没有文字 → 不弹),表现为"详情时有时无"。
+            # 让盘条不接收鼠标事件,悬停统一归窗口,整块区域都能弹(不必逐个给子控件设 tooltip)。
+            bar.setAttribute(Qt.WA_TransparentForMouseEvents)
             self._bars.append(bar)
 
         self._anim = QVariantAnimation(self)
