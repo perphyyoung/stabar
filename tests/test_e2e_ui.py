@@ -14,6 +14,9 @@ A 层覆盖不了、留给 B 层(`tests/test_e2e_real_input.py`)的三条:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
 from e2e_support import assert_in_order
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QContextMenuEvent
@@ -89,5 +92,41 @@ def test_tray_left_click_toggles_visibility(window, events) -> None:
         tray._on_activated(QSystemTrayIcon.ActivationReason.Trigger)
         assert window.isVisible()
         assert_in_order(events(), "event=window state=hidden", "event=window state=shown")
+    finally:
+        tray.hide()
+
+
+def test_tray_show_after_menu_hide_returns_to_idle(window, events, qtbot, monkeypatch) -> None:
+    """右键隐藏、再从托盘显示,应该回到平时的最暗档(回归:曾一直全亮)。
+
+    曾经的真 bug:`contextMenuEvent` 收尾按**光标实际位置**重判悬停,而点"隐藏"时光标正停在
+    菜单项上(菜单就弹在窗口里,该点仍在窗口矩形内)→ `_hovered` 被置回 True、亮度被拉到 1.0,
+    可窗口此刻已经隐藏;此后不会再有 Enter / Leave 来清这个标记,所以从托盘显示出来就是全亮的。
+    它也不是"下一次刷新会自愈"的:15 秒后的刷新读的也是这个 `_hovered`,照样拉满。
+    修法是收尾时先看窗口是否还在(见 `main.contextMenuEvent`)。
+    """
+    # 光标停在窗口内,等价于"刚点完菜单项"的那一瞬间(收尾逻辑读的是真实光标位置)
+    monkeypatch.setattr(
+        main, "QCursor", SimpleNamespace(pos=lambda: window.mapToGlobal(window.rect().center()))
+    )
+
+    window.show()
+    assert open_context_menu(window, choose="隐藏")[0] == "隐藏"
+    assert not window.isVisible()
+
+    tray = main.TrayIcon(window)
+    try:
+        tray._on_activated(QSystemTrayIcon.ActivationReason.Trigger)
+        assert window.isVisible()
+
+        idle_alpha = main.FIRST_RUN_IDLE_OPACITY * 255
+        assert window._bars[0]._alpha == pytest.approx(idle_alpha), (
+            f"从托盘显示后应回到最暗档 {idle_alpha:.1f},"
+            f"实际 {window._bars[0]._alpha:.1f}\n事件流尾部:\n" + "\n".join(events()[-6:])
+        )
+
+        # 也不是"下次刷新就自愈":刷新读的还是那个没被清掉的 _hovered
+        window.refresh()
+        qtbot.waitUntil(lambda: window._bars[0]._alpha == pytest.approx(idle_alpha), timeout=2000)
     finally:
         tray.hide()

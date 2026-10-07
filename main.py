@@ -113,32 +113,53 @@ COLOR_DANGER = (231, 92, 92)
 # ======================================================================
 
 
-def config_dir() -> Path:
-    """配置与日志所在目录,优先级从高到低:
+def _app_config_dir() -> Path:
+    """打包后的用户目录(%LOCALAPPDATA%\\stabar)。
 
-    1. 环境变量 STABAR_CONFIG_DIR —— 自动化测试用:每次跑在临时目录里,不碰你真实的
-       配置和日志,测试也能直接读那一份日志;
+    依赖 Qt 的应用名,所以调用方必须等 `setApplicationName(APP_NAME)` 之后再用 ——
+    应用名没设时 AppConfigLocation 会退化成 %LOCALAPPDATA% 本身(实测)。
+    """
+    base = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
+    directory = Path(base) if base else Path.home() / f".{APP_NAME}"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def config_dir() -> Path:
+    """**配置文件**所在目录,优先级从高到低:
+
+    1. 环境变量 `STABAR_CONFIG_DIR` —— 自动化测试用:把 ini 引到临时目录,不碰你真实的配置;
     2. 打包运行 -> %LOCALAPPDATA%\\stabar;
     3. 源码运行 -> 项目目录,方便直接手改。
 
     开发时留在项目目录是为了方便直接手改;打包后不能再写 exe 旁边,原因有两个:
     一是 onedir 的 __file__ 指向 _internal 子目录,配置会藏进包内部、升级就丢;
     二是装到 Program Files 之类的路径下可能根本没有写权限。
-
-    第 2 条依赖 Qt 的应用名,所以调用方必须等 setApplicationName(APP_NAME) 之后再用
-    —— 应用名没设时 AppConfigLocation 会退化成 %LOCALAPPDATA% 本身(实测),日志就会和
-    配置分家。
     """
     override = os.environ.get(CONFIG_DIR_ENV)
     if override:
         directory = Path(override)
     elif getattr(sys, "frozen", False):  # PyInstaller 打包运行时的标志
-        base = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
-        directory = Path(base) if base else Path.home() / f".{APP_NAME}"
+        directory = _app_config_dir()
     else:
         directory = Path(__file__).parent
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def log_dir() -> Path:
+    """**日志**所在目录,**只有两种**(见 `日志使用说明.md`):
+
+    - 打包运行 -> 用户配置目录(%LOCALAPPDATA%\\stabar),和打包后的 ini 同目录;
+    - 其他情况(源码运行、跑测试)-> 项目目录。
+
+    刻意**不理会** `STABAR_CONFIG_DIR`:那个变量只用来隔离**配置**。日志就两份,测试直接写
+    项目目录这份,跑完能立刻看;代价是多个用例共用一个文件,所以读日志必须按偏移量切
+    (见 `tests/e2e_support.read_since`)。
+    """
+    if getattr(sys, "frozen", False):
+        return _app_config_dir()
+    return Path(__file__).parent
 
 
 def settings_path() -> Path:
@@ -147,8 +168,8 @@ def settings_path() -> Path:
 
 
 def log_path() -> Path:
-    """日志文件位置:与配置文件同目录,便于一起备份 / 清理。"""
-    return logging_setup.log_path(config_dir())
+    """日志文件位置。"""
+    return logging_setup.log_path(log_dir())
 
 
 def lerp(a: float, b: float, t: float) -> float:
@@ -618,8 +639,15 @@ class StatusBarWindow(QWidget):
         # 菜单是 popup,弹出期间窗口收不到 enter / leave 事件。
         # 所以关掉后必须按光标实际位置重新判定,否则鼠标已经移开了却仍算悬停,
         # 窗口会一直停在最亮(而且要等下次重新进入再离开才能恢复)。
-        self._hovered = self.rect().contains(self.mapFromGlobal(QCursor.pos()))
-        self._retarget(animate=False)
+        #
+        # 但选中的若是"隐藏",窗口此刻已经不在了:菜单就弹在窗口矩形内,隐藏后光标"还在窗口上",
+        # 按位置重判会把 _hovered 又置回 True、把亮度拉满,而窗口已隐藏、不会再有 Enter / Leave
+        # 来清它 —— 从托盘显示出来就是全亮的(实测:event=window state=hidden 紧接着
+        # event=reveal target=1.00 reason=hover)。隐藏路径自己已经清干净悬停态(见 hide_widget),
+        # 所以这里不能碰一个不在屏幕上、也收不到鼠标的窗口。
+        if self.isVisible():
+            self._hovered = self.rect().contains(self.mapFromGlobal(QCursor.pos()))
+            self._retarget(animate=False)
 
 
 class TrayIcon(QSystemTrayIcon):
@@ -694,7 +722,7 @@ def main() -> int:
     # 日志目录同样由它算出,所以 setup_logging() 也必须排在这一行之后 ——
     # 实测:应用名没设时 AppConfigLocation 会退化成 %LOCALAPPDATA% 本身,日志就跟配置分家了。
     app.setApplicationName(APP_NAME)
-    level = logging_setup.setup_logging(config_dir(), APP_NAME)
+    level = logging_setup.setup_logging(log_dir(), APP_NAME)
     log.info(
         "event=start frozen=%s level=%s config=%s log=%s drives=%s",
         bool(getattr(sys, "frozen", False)),

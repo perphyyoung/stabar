@@ -23,12 +23,26 @@ from pathlib import Path
 # ======================================================================
 
 
-def read_events(path: Path) -> list[str]:
-    """把日志读成事件行列表(只保留 `event=` 之后的部分)。"""
+def read_since(path: Path, since: int = 0) -> str:
+    """读日志里"字节偏移量 since 之后"的内容。
+
+    日志只有两份(打包后 / 其他),测试与 dev 运行**共用**同一份(见 `日志使用说明.md`),
+    所以断言必须切掉之前的内容 —— 否则会读到别的用例或你自己的 dev 运行写下的事件,造成假通过。
+    文件被"超限清空"过(长度反而变小)时退回从头读。
+    """
     if not path.exists():
-        return []
+        return ""
+    if path.stat().st_size < since:
+        since = 0
+    with path.open("rb") as handle:
+        handle.seek(since)
+        return handle.read().decode("utf-8", errors="replace")
+
+
+def read_events(path: Path, since: int = 0) -> list[str]:
+    """把日志读成事件行列表(只保留 `event=` 之后的部分)。"""
     events = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in read_since(path, since).splitlines():
         marker = line.find("event=")
         if marker >= 0:
             events.append(line[marker:].rstrip())
@@ -46,11 +60,11 @@ def assert_in_order(events: list[str], *needles: str) -> None:
         position = found
 
 
-def wait_for_event(path: Path, pattern: str, timeout: float = 6.0) -> bool:
+def wait_for_event(path: Path, pattern: str, timeout: float = 6.0, since: int = 0) -> bool:
     """轮询日志等某个事件出现(B 层用;A 层同步执行,不需要等)。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if any(pattern in event for event in read_events(path)):
+        if any(pattern in event for event in read_events(path, since)):
             return True
         time.sleep(0.05)
     return False

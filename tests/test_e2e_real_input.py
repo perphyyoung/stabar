@@ -14,6 +14,10 @@ uv run pytest tests/test_e2e_real_input.py -q
 
 这一层存在的唯一理由,是它覆盖 A 层覆盖不到的三件事:隐形命中层是否真的接住鼠标、
 操作系统把右键转成上下文菜单的那一层、以及真实退出路径。
+
+日志按设计只有两份(打包后 / 其他):打包产物写 `%LOCALAPPDATA%\\stabar\\stabar.log`,而且
+**不理会** `STABAR_CONFIG_DIR`(那个变量只隔离配置)。所以这里要按真实路径找日志,并按偏移量只读
+本次启动之后写的部分。
 """
 
 from __future__ import annotations
@@ -40,6 +44,9 @@ from e2e_support import (
     wait_for_event,
 )
 
+import logging_setup
+import main
+
 EXE = Path(__file__).resolve().parent.parent / "dist" / "stabar" / "stabar.exe"
 
 pytestmark = [
@@ -51,6 +58,12 @@ pytestmark = [
 ]
 
 
+def packaged_log_path() -> Path:
+    """打包后的日志位置:与打包后的 ini 同目录(%LOCALAPPDATA%\\stabar\\stabar.log)。"""
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+    return Path(base) / main.APP_NAME / logging_setup.LOG_NAME
+
+
 def _tail(path: Path, lines: int = 20) -> str:
     if not path.exists():
         return "(没有日志文件)"
@@ -59,21 +72,31 @@ def _tail(path: Path, lines: int = 20) -> str:
 
 @pytest.fixture
 def app(tmp_path):
-    """启动打包后的 exe:配置与日志都在 tmp 里(不碰真实文件),日志开到 DEBUG。"""
+    """启动打包后的 exe:配置隔离到 tmp,日志写打包后的那一份(与"只有两份"的设计一致)。"""
     env = {**os.environ, "STABAR_CONFIG_DIR": str(tmp_path), "STABAR_LOG_LEVEL": "DEBUG"}
     # conftest 给**本进程**设了 QT_QPA_PLATFORM=offscreen(离屏跑单测),但绝不能再透给子进程:
     # 打包按体积裁剪时把 qoffscreen.dll 这类插件剔掉了,子进程会直接启动失败并弹出
     # "no Qt platform plugin could be initialized. Available platform plugins are: windows."
     env.pop("QT_QPA_PLATFORM", None)
+
+    log = packaged_log_path()
+    since = log.stat().st_size if log.exists() else 0  # 日志是共享的:只读本次启动之后的部分
     proc = subprocess.Popen([str(EXE)], env=env)
-    log = tmp_path / "stabar.log"
     try:
-        assert wait_for_event(log, "event=window state=shown", 15), (
+        assert wait_for_event(log, "event=window state=shown", 15, since=since), (
             f"启动失败:子进程退出码={proc.poll()}(None 表示还活着)\n日志尾部:\n{_tail(log)}"
         )
         hwnd = find_window(proc.pid)
         assert hwnd, "没找到窗口句柄"
-        yield SimpleNamespace(proc=proc, hwnd=hwnd, log=log, ini=tmp_path / "stabar.ini")
+        yield SimpleNamespace(
+            proc=proc,
+            hwnd=hwnd,
+            log=log,
+            since=since,
+            ini=tmp_path / "stabar.ini",
+            wait=lambda pattern, timeout=6.0: wait_for_event(log, pattern, timeout, since=since),
+            events=lambda: read_events(log, since),
+        )
     finally:
         proc.terminate()
         try:
@@ -96,7 +119,7 @@ def test_drag_moves_window_and_saves_position(app) -> None:
     """拖得动 = 隐形命中层真的接收鼠标。这是 A 层唯一覆盖不到的不变量。"""
     before = rect_of(app.hwnd)
     guarded(lambda: drag(app.hwnd))
-    assert wait_for_event(app.log, "event=position_saved", 3), "日志里没有 position_saved"
+    assert app.wait("event=position_saved", 3), "日志里没有 position_saved"
 
     after = rect_of(app.hwnd)
     assert (after[0], after[1]) != (before[0], before[1]), "日志说保存了位置,窗口却没动"
@@ -108,25 +131,25 @@ def test_drag_moves_window_and_saves_position(app) -> None:
 def test_real_right_click_hides_window(app) -> None:
     """真右键 → 菜单 → 键盘选「隐藏」:覆盖"OS 把右键转成上下文菜单"的那一层。"""
     guarded(lambda: right_click(app.hwnd))
-    assert wait_for_event(app.log, "event=menu open=context", 3), "右键没有弹出菜单"
+    assert app.wait("event=menu open=context", 3), "右键没有弹出菜单"
 
     tap_keys(VK_DOWN)  # 菜单刚打开没有高亮,第一次按下键 = 第一项「隐藏」
     tap_keys(VK_RETURN)
-    assert wait_for_event(app.log, "event=window state=hidden", 3), "日志里没有 state=hidden"
+    assert app.wait("event=window state=hidden", 3), "日志里没有 state=hidden"
 
     assert is_visible(app.hwnd) == 0  # 外部事实:窗口真的不可见了
-    assert_in_order(read_events(app.log), "event=menu item=隐藏", "event=window state=hidden")
+    assert_in_order(app.events(), "event=menu item=隐藏", "event=window state=hidden")
 
 
 def test_menu_quit_exits_process_gracefully(app) -> None:
     """真菜单选「退出」→ event=stop 且进程自己退出(退出码 0):验证优雅退出路径。"""
     guarded(lambda: right_click(app.hwnd))
-    assert wait_for_event(app.log, "event=menu open=context", 3), "右键没有弹出菜单"
+    assert app.wait("event=menu open=context", 3), "右键没有弹出菜单"
 
     tap_keys(VK_DOWN, VK_DOWN, VK_DOWN)  # 隐藏 → 立即刷新 → 退出(分隔符会被跳过)
     tap_keys(VK_RETURN)
-    assert wait_for_event(app.log, "event=menu item=退出", 3), "没选到退出"
-    assert wait_for_event(app.log, "event=stop", 3), "没有 stop 事件,说明不是优雅退出"
+    assert app.wait("event=menu item=退出", 3), "没选到退出"
+    assert app.wait("event=stop", 3), "没有 stop 事件,说明不是优雅退出"
 
     assert app.proc.wait(timeout=10) == 0  # 进程自己退出,不是被 kill 的
-    assert_in_order(read_events(app.log), "event=menu item=退出", "event=stop")
+    assert_in_order(app.events(), "event=menu item=退出", "event=stop")

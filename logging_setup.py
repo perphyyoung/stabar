@@ -17,9 +17,11 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 
 from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+from PySide6.QtGui import QGuiApplication
 
 # --- 级别 ---
 LOG_LEVEL_ENV = "STABAR_LOG_LEVEL"  # 覆盖默认级别,大小写不敏感
@@ -102,6 +104,31 @@ def resolve_level() -> int:
     return LOG_LEVEL_FROZEN if getattr(sys, "frozen", False) else LOG_LEVEL_DEV
 
 
+# 记录的"来源标签":跑测试时由 tests/conftest.py 设成用例名,这样**共享一份日志**时也能看出
+# 每行是谁写的。生产路径从不设置它,标签为空时输出与以前逐字符一致。
+_source_label: ContextVar[str] = ContextVar("stabar_source_label", default="")
+
+
+def set_source_label(label: str) -> None:
+    """给之后的日志记录打上来源标签(测试用;传空串即取消)。"""
+    _source_label.set(label)
+
+
+class _LabelledFormatter(logging.Formatter):
+    """把来源标签插进 logger 名后面:`stabar[test_menu_hide_really_hides]: event=...`。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        label = _source_label.get()
+        if not label:
+            return super().format(record)
+        original = record.name
+        record.name = f"{original}[{label}]"
+        try:
+            return super().format(record)
+        finally:
+            record.name = original  # 同一条记录还要给别的 handler 用,用完还原
+
+
 def setup_logging(directory: Path, logger_name: str) -> int:
     """初始化日志,返回实际生效的级别。
 
@@ -112,7 +139,7 @@ def setup_logging(directory: Path, logger_name: str) -> int:
     _logger = logging.getLogger(logger_name)
 
     level = resolve_level()
-    formatter = logging.Formatter(LOG_FORMAT, LOG_DATEFMT)
+    formatter = _LabelledFormatter(LOG_FORMAT, LOG_DATEFMT)
     handlers: list[logging.Handler] = []
     problem = ""
 
@@ -145,23 +172,43 @@ def _install_qt_bridge() -> None:
     """把 Qt 自己发出的警告以上消息也收进日志。
 
     这类问题(加载不到平台插件、图标解码失败)恰恰只在打包后出现,而打包后没有控制台,
-    不接进来就完全看不到。Qt 自身的 debug / info 太吵,丢掉。
+    不接进来就完全看不到。Qt 自身的 debug / info 太吵,丢掉;离屏平台的专属噪音也丢掉
+    (见 `_OFFSCREEN_NOISE`)。
     """
     global _qt_bridge
 
     def bridge(mode, context, message) -> None:
         if mode in (QtMsgType.QtDebugMsg, QtMsgType.QtInfoMsg):
             return
+        text = " ".join(str(message).split())  # 折成单行,维持"一行一个事件"
+        if _is_offscreen_noise(text):
+            return
         level = {
             QtMsgType.QtWarningMsg: logging.WARNING,
             QtMsgType.QtCriticalMsg: logging.ERROR,
             QtMsgType.QtFatalMsg: logging.CRITICAL,
         }.get(mode, logging.WARNING)
-        # 折成单行:Qt 的消息可能带换行,多行会破坏"一行一个事件"的约定
-        logging.getLogger("qt").log(level, "event=qt %s", " ".join(str(message).split()))
+        logging.getLogger("qt").log(level, "event=qt %s", text)
 
     _qt_bridge = bridge
     qInstallMessageHandler(bridge)
+
+
+# 离屏平台(跑测试时才用)的专属噪音:它不支持 raise() / 抓键盘,也没有字体目录,于是每次 show()、
+# 每次弹菜单都刷一串警告。这些只说明"这个平台能力不全",不说明程序有问题,所以不记。
+# **只在离屏平台过滤** —— dev 与打包用真平台,那时任何 Qt 警告都要留下。
+_OFFSCREEN_NOISE = (
+    "This plugin does not support",  # raise() / grabbing the keyboard
+    "Cannot find font directory",
+    "QFont::setPointSizeF: Point size <= 0",
+)
+
+
+def _is_offscreen_noise(message: str) -> bool:
+    """这条 Qt 消息是不是离屏平台的专属噪音。"""
+    if not any(pattern in message for pattern in _OFFSCREEN_NOISE):
+        return False
+    return QGuiApplication.platformName() == "offscreen"
 
 
 def _install_excepthook() -> None:

@@ -61,8 +61,15 @@ uv run python main.py
 $env:STABAR_LOG_LEVEL = "DEBUG"    # 排查用;大小写不敏感,重启进程才生效
 ```
 
-日志文件与配置**同目录**(`stabar.log`),逐条 flush;超过约 1 MB 就**清空重写**,不产生
-历史文件(旧内容会丢,要留档就把 `logging_setup.LOG_MAX_BYTES` 调大)。事件行统一为
+**日志只有两份**:
+
+| 运行形态 | 位置 |
+|---|---|
+| 打包运行 | `%LOCALAPPDATA%\stabar\stabar.log` |
+| 其他(源码运行、跑测试) | 项目目录下的 `stabar.log` |
+
+逐条 flush;超过约 1 MB 就**清空重写**,不产生历史文件(旧内容会丢,要留档就把
+`logging_setup.LOG_MAX_BYTES` 调大)。`STABAR_CONFIG_DIR` 只隔离配置,不会移动日志。事件行统一为
 `event=<名词> key=value ...`,一行一个事件,既给人看也当自动化测试的观察点。完整的事件
 清单、位置对照和测试用法见 [`日志使用说明.md`](日志使用说明.md)。
 

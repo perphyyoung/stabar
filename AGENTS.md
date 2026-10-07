@@ -64,6 +64,9 @@ uv run pytest -q     # 4. 跑测试
 
 - **第 1~3 层**:离屏(`QT_QPA_PLATFORM=offscreen`)、配置走 `tmp_path` / `STABAR_CONFIG_DIR`、
   注册表用 `conftest.FakeWinreg`。**一律不碰真实 `stabar.ini` 与真实 Run 键**,也不弹真窗口。
+- **日志只有两份**(打包后 / 其他),测试直接写**项目目录**那一份、**不隔离**。所以断言一律用
+  `events()` / `log_text()`(已按偏移量切),**不要直接读整个文件** —— 那会读到别的用例或你自己的
+  dev 运行写下的事件,造成假通过。第 4 层读打包后那份,同样按偏移量切(`e2e_support.read_since`)。
 - **第 4 层**:默认 skip;要跑先打包,再 `$env:STABAR_E2E = "1"`。它会真的移动鼠标、抢焦点,
   必须有真实桌面会话。两条必须遵守:
   - 给子进程透传环境时 **`env.pop("QT_QPA_PLATFORM", None)`** —— 否则子进程会去找打包时已被裁掉的
