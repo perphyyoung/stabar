@@ -2,11 +2,24 @@
 
 本仓库的协作约定,面向在此工作的 AI 编码助手(以及人)。只写需要遵守的部分。
 
-## 代码检查:改完必须跑
+## 代码检查与格式化:改完按这个顺序跑
 
-- 改动任何 Python 代码后,必须运行 `ruff check`(用**全局安装的 ruff**,当前 0.16.x),
-  **必须全绿**才能收尾。
-- 规则配置在 `pyproject.toml` 的 `[tool.ruff.lint]`:`extend-select = ["N"]`,已启用命名规则。
+用**全局安装的 ruff**(当前 0.16.x)。三步顺序不能颠倒:
+
+```powershell
+ruff check --fix     # 1. 修可自动修的问题(含 import 排序)
+ruff format          # 2. 统一格式
+ruff check           # 3. 复核
+```
+
+- `ruff format` 必须放在 `ruff check --fix` **之后**:自动修复可能重排代码,格式化要在最终
+  形态上做,否则两者会互相推翻。
+- 收尾标准:`ruff check` 输出 `All checks passed!`,`ruff format --check` 输出
+  `already formatted`。
+- **不要配 format on save**:格式化只走命令行,避免编辑器与 agent 的改动互相打架。
+- 配置都在 `pyproject.toml`:`line-length = 100`;`[tool.ruff.lint]` 的
+  `extend-select = ["I", "N"]`(import 排序 + 命名规范)。用 `extend` 而不是 `select`,
+  免得顶掉 ruff 的默认规则集。
 - Qt 的重写方法名**必须是驼峰**(`paintEvent`、`enterEvent` 等),已在
   `[tool.ruff.lint.pep8-naming]` 的 `extend-ignore-names` 里集中豁免。
   **不要写行内 `# noqa`**;新增 Qt 重写方法就把名字加进那份白名单。

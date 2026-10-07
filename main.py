@@ -257,8 +257,7 @@ def make_tray_icon() -> QIcon:
     if icon.isNull():
         # .ico 要靠 Qt 的 qico.dll 插件解码,打包时漏掉就会走到这里:
         # QIcon 不报错、只返回空图标,表现为托盘图标不出现,所以显式喊一声。
-        print(f"警告: 图标解码失败({icon_path()}),请检查打包是否漏了 qico.dll",
-              file=sys.stderr)
+        print(f"警告: 图标解码失败({icon_path()}),请检查打包是否漏了 qico.dll", file=sys.stderr)
     return icon
 
 
@@ -353,9 +352,7 @@ class DiskBar(QWidget):
         fill_w = bar_w * min(ratio, 1.0)
         if fill_w > 0:
             fill = QPainterPath()
-            fill.addRoundedRect(
-                bar_x, bar_y, max(fill_w, bar_h), bar_h, bar_h / 2, bar_h / 2
-            )
+            fill.addRoundedRect(bar_x, bar_y, max(fill_w, bar_h), bar_h, bar_h / 2, bar_h / 2)
             painter.fillPath(fill, self._bar_color(ratio))
 
         draw_outlined_text(
@@ -420,9 +417,7 @@ class StatusBarWindow(QWidget):
     # ---- 持久化 ----
     def _read_idle_opacity(self) -> float:
         try:
-            value = float(
-                self._settings.value("idle_opacity", FIRST_RUN_IDLE_OPACITY)
-            )
+            value = float(self._settings.value("idle_opacity", FIRST_RUN_IDLE_OPACITY))
         except (TypeError, ValueError):
             return FIRST_RUN_IDLE_OPACITY
         return min(1.0, max(MIN_OPACITY, value))
@@ -526,9 +521,7 @@ class StatusBarWindow(QWidget):
     # ---- 拖动 ----
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            self._drag_offset = (
-                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            )
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event) -> None:
