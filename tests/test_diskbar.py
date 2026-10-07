@@ -63,3 +63,13 @@ def test_alpha_controls_painted_opacity(monkeypatch, qapp) -> None:
     assert painted_alpha(bar, *text_pixel) == 255
     bar.set_alpha(64)
     assert painted_alpha(bar, *text_pixel) == 64
+
+
+def test_percent_label_has_one_decimal(monkeypatch, qapp) -> None:
+    """主界面上的占用率带 1 位小数(80.2% 这种),不四舍五入成整数。"""
+    assert make_bar(monkeypatch, used=250, total=1000).percent_label() == "25.0%"
+    assert make_bar(monkeypatch, used=802, total=1000).percent_label() == "80.2%"
+    assert make_bar(monkeypatch, used=1000, total=1000).percent_label() == "100.0%"
+
+    monkeypatch.setattr(main, "read_disk", lambda path: None)
+    assert main.DiskBar("Z:/").percent_label() == "0.0%"  # 读不到数据也不能崩

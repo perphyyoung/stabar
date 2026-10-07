@@ -407,6 +407,14 @@ class DiskBar(QWidget):
         self._alpha = alpha
         self.update()
 
+    def percent_label(self) -> str:
+        """画在右侧的占用率文字:**带 1 位小数**。
+
+        单独抽出来是为了能直接断言这一处格式(画到像素上去验证小数点不现实)。
+        """
+        used, total = self._stats or (0, 0)
+        return f"{used / total * 100:.1f}%" if total else "0.0%"
+
     def _bar_color(self, ratio: float) -> QColor:
         if ratio >= DANGER_THRESHOLD:
             self._warned = True
@@ -428,7 +436,8 @@ class DiskBar(QWidget):
             painter, QRectF(0, 0, 26, h), self._label, self._font, text_color, outline
         )
 
-        percent_w = 44
+        # 列宽按"100.0%"量出来:写死会在换字体或高 DPI 下把小数点挤掉
+        percent_w = QFontMetricsF(self._font).horizontalAdvance("100.0%") + 2
         bar_x = 32
         bar_w = max(60, w - bar_x - percent_w - 8)
         bar_h = 8
@@ -461,7 +470,7 @@ class DiskBar(QWidget):
         draw_outlined_text(
             painter,
             QRectF(w - percent_w, 0, percent_w, h),
-            f"{ratio * 100:.0f}%",
+            self.percent_label(),
             self._font,
             dim_color,
             outline,
