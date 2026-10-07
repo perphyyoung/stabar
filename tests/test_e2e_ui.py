@@ -80,18 +80,52 @@ def test_menu_hide_really_hides(window, events) -> None:
 
 
 def test_tray_left_click_toggles_visibility(window, events) -> None:
-    """左键单击托盘 = 切换显示:走真实的 activated 槽,不是直接调切换函数。"""
+    """左键单击托盘 = 切换显示:发的是 `activated` 信号,覆盖"信号 → 槽"的连线。
+
+    进程内只能走到信号这一层:"系统把点击送到托盘图标"发生在 shell 那一侧,进程内看不见。
+    """
     tray = main.TrayIcon(window)
     try:
         window.show()
 
-        tray._on_activated(QSystemTrayIcon.ActivationReason.Trigger)
+        tray.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
         assert not window.isVisible()
         assert_in_order(events(), "event=window state=hidden")
 
-        tray._on_activated(QSystemTrayIcon.ActivationReason.Trigger)
+        tray.activated.emit(QSystemTrayIcon.ActivationReason.Trigger)
         assert window.isVisible()
         assert_in_order(events(), "event=window state=hidden", "event=window state=shown")
+    finally:
+        tray.hide()
+
+
+def test_tray_menu_pops_and_sets_idle_opacity(window, events, qtbot) -> None:
+    """托盘菜单真的弹出来,并改到"未报警时的透明度"。
+
+    这是 Qt 官方推荐的托盘自动化姿势(`geometry()` + `contextMenu().popup()`,见官方
+    知识库 "Automating Tray Icon"):不点屏幕坐标、不依赖 shell。**真点托盘图标**那件事
+    官方明确说坐标会因其他程序增删图标而漂移,归 B 层(`test_e2e_real_input.py`)。
+    """
+    tray = main.TrayIcon(window)
+    try:
+        menu = tray.contextMenu()
+        assert menu is not None
+
+        def drag_slider() -> None:
+            tray._opacity_slider.setValue(10)  # 拖到第 10 格 = 50%
+            tray._opacity_slider.sliderReleased.emit()  # 松手 → 提交
+            menu.close()  # 收起菜单(还会触发一次提交,应被去重)
+
+        QTimer.singleShot(120, drag_slider)
+        menu.popup(tray.geometry().center())  # 离屏平台下 geometry 可能是空矩形,popup 不挑坐标
+
+        qtbot.waitUntil(
+            lambda: any("event=idle_opacity value=0.50" in e for e in events()), timeout=2000
+        )
+        assert_in_order(events(), "event=menu open=tray", "event=idle_opacity value=0.50")
+        assert window.idle_opacity == pytest.approx(0.50)
+        assert window._bars[0]._alpha == pytest.approx(0.50 * 255)  # 立刻生效
+        assert len([e for e in events() if "event=idle_opacity" in e]) == 1  # 松手 + 关菜单只记一条
     finally:
         tray.hide()
 

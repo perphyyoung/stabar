@@ -46,12 +46,21 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
 )
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QSlider,
+    QSystemTrayIcon,
+    QWidget,
+    QWidgetAction,
+)
 
 import logging_setup
 
 # ======================================================================
-# 观感调节区:想让小组件更醒目,只动这一块(平时的不透明度在配置文件里)
+# 观感调节区:想让小组件更醒目,只动这一块(平时的不透明度:托盘菜单或配置文件)
 # ======================================================================
 
 APP_NAME = "stabar"  # 决定打包后配置目录的名字
@@ -59,9 +68,12 @@ DRIVES = ("C:/", "D:/")  # 要监控的盘符
 REFRESH_MS = 15_000  # 磁盘数据刷新间隔(毫秒)
 
 # --- 前景不透明度:文字、进度条、百分比同步生效 ---
-# 平时的值不在这里,而在配置文件里(见 FIRST_RUN_IDLE_OPACITY / settings_path())
+# 平时的值不在这里,而在配置文件里,也可以从托盘菜单的「透明度」滑杆改
+# (见 FIRST_RUN_IDLE_OPACITY / settings_path() / StatusBarWindow.set_idle_opacity)
 LIVE_OPACITY = 1.00  # 鼠标悬停 / 自动提亮时的不透明度
-MIN_OPACITY = 0.01  # 配置文件允许的最小值,再小就真的是彻底看不见了
+MIN_OPACITY = 0.05  # 配置文件允许的最小值(5%,再小就真的看不见了;滑杆的最小格也是它)
+OPACITY_STEP = 0.05  # 滑杆步进(5%):一格一档,拖动与键盘都是这个粒度
+OPACITY_STEPS = round(1.0 / OPACITY_STEP)  # 滑杆格数(1 格 = 5%,共 20 格)
 FADE_MS = 260  # 自动提亮的补间时长(毫秒);鼠标悬停是硬切,不走这里
 
 # --- 自动提亮:占用达到水位才变亮,低于水位严格按配置文件的不透明度显示 ---
@@ -76,6 +88,12 @@ ROW_H = 22
 PAD = 6
 GAP = 6
 EDGE_MARGIN = 24
+
+# --- 托盘菜单 ---
+# 控件行(滑杆)没有菜单项那段缩进,要自己补上左边距才能与其它行文字左对齐。
+# 实测(抓图 + actionGeometry):菜单项文字从菜单面板边缘 27px 处开始 = 面板 3 + 图标列 20 + 间距 4。
+MENU_ITEM_INDENT = 27
+SLIDER_WIDTH = 96  # 滑杆长度:够细调即可,太长会把整个菜单撑宽
 
 # --- 图标文件:托盘图标与 exe 文件图标共用这一份,见 icon_path() ---
 ICON_NAME = "stabar.ico"
@@ -195,6 +213,28 @@ def reveal_level(max_ratio: float) -> float:
         return 1.0
     span = WARN_THRESHOLD - REVEAL_START
     return (max_ratio - REVEAL_START) / span if span > 0 else 1.0
+
+
+def percent_text(value: float) -> str:
+    """把不透明度写成给人看的百分比(滑杆右侧那个标签)。"""
+    return f"{round(value * 100)}%"
+
+
+def opacity_units(value: float) -> int:
+    """不透明度 -> 滑杆格数。
+
+    配置文件里可以写任意精度(如 0.33),滑杆表达不了就取最近的一格;标签仍显示真实值。
+    """
+    return min(OPACITY_STEPS, max(1, round(value * OPACITY_STEPS)))
+
+
+def opacity_from_step(step: int) -> float:
+    """滑杆格数 -> 不透明度。
+
+    用"格数 / 总格数"而不是"格数 × 0.05":后者带浮点尾巴(14 × 0.05 = 0.7000000000000001),
+    写进配置文件就成了难看的 `idle_opacity=0.7000000000000001`。
+    """
+    return step / OPACITY_STEPS
 
 
 def draw_outlined_text(
@@ -451,6 +491,9 @@ class StatusBarWindow(QWidget):
         self._target = -1.0
         self._hovered = False
         self._idle_opacity = self._read_idle_opacity()
+        # 已经提交(写进配置文件)的值:拖滑杆时只预览不落盘,提交时靠它去重 ——
+        # 否则"松手"和"菜单关闭"两次提交会写出两条一样的日志
+        self._saved_idle_opacity = self._idle_opacity
         # 把生效值回写,让配置文件自解释:不用翻代码就知道程序实际用的是多少。
         # 代价是回写之后 ini 成为权威值,再改 FIRST_RUN_IDLE_OPACITY 不会生效;
         # 想回到那个初值,把 ini 里这一行删掉即可。sync() 是为了让它立刻落盘,
@@ -490,6 +533,42 @@ class StatusBarWindow(QWidget):
             # 夹取会静默改写你写的值,是"调了却不生效"的经典来源,必须留痕
             log.warning("event=config_clamped key=idle_opacity value=%s used=%s", value, clamped)
         return clamped
+
+    @property
+    def idle_opacity(self) -> float:
+        """未报警时的不透明度(托盘菜单标题显示的、也是配置文件里那个值)。"""
+        return self._idle_opacity
+
+    def preview_idle_opacity(self, value: float) -> None:
+        """拖滑杆时的实时预览:只改画面,**不写盘、不记日志**。
+
+        拖一次会发几十个 `valueChanged`,每个都落盘既浪费又把日志刷爆;提交归
+        `set_idle_opacity`(松手 / 菜单关闭时)。
+        """
+        value = min(1.0, max(MIN_OPACITY, value))
+        if value == self._idle_opacity:
+            return
+        self._idle_opacity = value
+        self._apply_level(self._level)
+
+    def set_idle_opacity(self, value: float) -> None:
+        """提交"未报警时的透明度":落盘 + 记一条 `event=idle_opacity`。
+
+        只动最暗档那一端:`_apply_level` 里 `alpha = lerp(idle, LIVE, level)`,
+        所以悬停 / 提亮中(level > 0)画面不受影响,松手回到最暗档才看得出差别。
+
+        画面可能已经被 `preview_idle_opacity` 改过,所以**不能**拿"值没变"当跳过的理由 ——
+        那样拖完之后根本不会写盘;去重看的是"这个值是否已经落过盘"。
+        """
+        value = min(1.0, max(MIN_OPACITY, value))
+        self._idle_opacity = value
+        if value == self._saved_idle_opacity:
+            return  # 已经提交过同一个值(松手 + 菜单关闭会各来一次),不重复写盘与记日志
+        self._saved_idle_opacity = value
+        self._settings.setValue("idle_opacity", value)
+        self._settings.sync()  # 立刻落盘:菜单里改完就断电也不该丢
+        self._apply_level(self._level)
+        log.info("event=idle_opacity value=%.2f", value)
 
     def _restore_position(self) -> None:
         x = self._settings.value("pos_x")
@@ -662,6 +741,9 @@ class TrayIcon(QSystemTrayIcon):
         self._visibility = self._menu.addAction("隐藏", self._toggle_visible)
         self._menu.addAction("立即刷新", window.refresh)
 
+        # 平时的不透明度:一行滑杆(位置由这里的调用点决定:紧跟"立即刷新")
+        self._add_opacity_row(window)
+
         self._click_through = self._menu.addAction("鼠标穿透")
         self._click_through.setCheckable(True)
         self._click_through.toggled.connect(window.set_click_through)
@@ -673,6 +755,10 @@ class TrayIcon(QSystemTrayIcon):
         self._menu.addSeparator()
         self._menu.addAction("退出", QApplication.quit)
         self._menu.aboutToShow.connect(self._sync_state)
+        # 托盘菜单弹出的唯一留痕:真右键托盘图标时只有它能证明"点击真的到了图标上"
+        self._menu.aboutToShow.connect(lambda: log.debug("event=menu open=tray"))
+        # 同窗口右键菜单:记下选中的是哪一项
+        self._menu.triggered.connect(lambda action: log.info("event=menu item=%s", action.text()))
         self.setContextMenu(self._menu)
 
         self.activated.connect(self._on_activated)
@@ -683,6 +769,13 @@ class TrayIcon(QSystemTrayIcon):
     def _sync_state(self) -> None:
         """菜单弹出前,把文字和勾选对齐到窗口的真实状态。"""
         self._visibility.setText("隐藏" if self._window.isVisible() else "显示")
+        # 滑杆对齐生效值;配置文件里可以写任意精度(如 0.33),滑杆取最近的一格,
+        # 标签仍显示真实值 —— 不假装能表达它
+        self._opacity_slider.blockSignals(True)  # 对齐不该反过来触发预览
+        self._opacity_slider.setValue(opacity_units(self._window.idle_opacity))
+        self._opacity_slider.blockSignals(False)
+        self._opacity_value.setText(percent_text(self._window.idle_opacity))
+
         blocked = bool(self._window.windowFlags() & Qt.WindowTransparentForInput)
         self._click_through.blockSignals(True)  # 否则会回环触发 set_click_through
         self._click_through.setChecked(blocked)
@@ -691,6 +784,51 @@ class TrayIcon(QSystemTrayIcon):
         self._autostart.blockSignals(True)  # 同上,避免回环
         self._autostart.setChecked(is_autostart_enabled())
         self._autostart.blockSignals(False)
+
+    def _add_opacity_row(self, window: StatusBarWindow) -> None:
+        """在菜单里插一行「透明度」滑杆(未报警时的不透明度)。
+
+        用官方机制 `QWidgetAction` + `setDefaultWidget` 把控件放进菜单。**实测**:菜单 popup 里
+        控件能收到 press / move / release,真鼠标按住拖动确实改值,菜单也不会被按下就关掉。
+
+        拖动期间只预览,松手 / 菜单关闭时才提交落盘(见 `_commit_opacity`)。
+        """
+        holder = QWidget(self._menu)
+        layout = QHBoxLayout(holder)
+        layout.setContentsMargins(MENU_ITEM_INDENT, 4, 10, 4)  # 左边距补上菜单项那段缩进
+        layout.setSpacing(8)
+
+        self._opacity_slider = QSlider(Qt.Horizontal, holder)
+        # 一格 = OPACITY_STEP(5%),量程就是配置允许的整个区间(5% ~ 100%)
+        self._opacity_slider.setRange(1, OPACITY_STEPS)
+        self._opacity_slider.setValue(opacity_units(window.idle_opacity))
+        self._opacity_slider.setMinimumWidth(SLIDER_WIDTH)
+        self._opacity_slider.setToolTip("未报警时的前景不透明度")
+        self._opacity_value = QLabel(percent_text(window.idle_opacity), holder)
+        self._opacity_value.setMinimumWidth(36)
+
+        layout.addWidget(QLabel("透明度", holder))
+        layout.addWidget(self._opacity_slider)
+        layout.addWidget(self._opacity_value)
+
+        action = QWidgetAction(self._menu)
+        action.setText("透明度")  # 控件行本身没有文字,给 action 一个名字便于断言与调试
+        action.setDefaultWidget(holder)
+        self._menu.addAction(action)  # 插在哪由 __init__ 里的调用点决定
+
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self._opacity_slider.sliderReleased.connect(self._commit_opacity)
+        self._menu.aboutToHide.connect(self._commit_opacity)  # 拖到一半直接点别处也算提交
+
+    def _on_opacity_changed(self, step: int) -> None:
+        """拖动过程中:只预览,不落盘(拖一次会发几十个信号)。"""
+        value = opacity_from_step(step)
+        self._opacity_value.setText(percent_text(value))
+        self._window.preview_idle_opacity(value)
+
+    def _commit_opacity(self) -> None:
+        """松手 / 菜单关闭:提交(落盘 + 一条 `event=idle_opacity`);同一个值重复提交会被去重。"""
+        self._window.set_idle_opacity(opacity_from_step(self._opacity_slider.value()))
 
     def _set_autostart(self, enabled: bool) -> None:
         try:
@@ -712,6 +850,8 @@ class TrayIcon(QSystemTrayIcon):
 
     def _on_activated(self, reason) -> None:
         # 左键单击切换显示;右键是菜单,由系统直接弹出,不走这里
+        # 记下来路:短时间内第二次点击会被当成双击(DoubleClick),这正是"点了没反应"的常见原因
+        log.debug("event=tray activated=%s", reason.name)
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._toggle_visible()
 

@@ -251,3 +251,108 @@ def tap_keys(*keys: int, gap: float = 0.12) -> None:
         _send(_key(vk))
         _send(_key(vk, up=True))
         time.sleep(gap)
+
+
+# ======================================================================
+# 托盘图标:定位与点击(只有 B 层用)
+#
+# 实测(Qt 6.11 / Win11):托盘图标挂在被测进程里一个**不可见**的顶层窗口上,类名含
+# `TrayIconMessageWindow`、`uID = 0`;拿它问 `Shell_NotifyIconGetRect` 就能得到图标在
+# 屏幕上的矩形,而该点落在 explorer 的 `TrayNotifyWnd` 里 —— 于是"真点托盘图标"可以
+# 由进程外的测试完成。图标被收进溢出、还没展开时矩形为空,上层应据此跳过。
+# ======================================================================
+
+TRAY_CLASS_HINT = "TrayIconMessageWindow"
+VK_ESCAPE = 0x1B  # 关掉弹出的菜单
+
+_shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+_user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+
+
+class NOTIFYICONIDENTIFIER(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("hWnd", wintypes.HWND),
+        ("uID", wintypes.UINT),
+        ("guidItem", ctypes.c_byte * 16),
+    ]
+
+
+_shell32.Shell_NotifyIconGetRect.argtypes = (
+    ctypes.POINTER(NOTIFYICONIDENTIFIER),
+    ctypes.POINTER(wintypes.RECT),
+)
+_shell32.Shell_NotifyIconGetRect.restype = ctypes.c_long
+
+
+@ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+def _enum_all(hwnd, _lparam):
+    pid = wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if pid.value == _enum_all.target:
+        _enum_all.found.append(hwnd)
+    return True
+
+
+def windows_of(pid: int) -> list[int]:
+    """该进程的**全部**顶层窗口,含不可见的 —— 托盘图标那个窗口就是不可见的。
+
+    (`find_window()` 只找可见窗口,是给小组件本身用的。)
+    """
+    _enum_all.target = pid
+    _enum_all.found = []
+    _user32.EnumWindows(_enum_all, 0)
+    return list(_enum_all.found)
+
+
+def class_of(hwnd: int) -> str:
+    buffer = ctypes.create_unicode_buffer(256)
+    _user32.GetClassNameW(hwnd, buffer, 256)
+    return buffer.value
+
+
+def tray_icon_rect(pid: int, timeout: float = 5.0) -> tuple[int, int, int, int] | None:
+    """托盘图标的屏幕矩形;超时拿不到(被收进未展开的溢出、或根本没建)返回 None。
+
+    **必须轮询**:图标是进程起来之后才注册到 shell 的,启动瞬间就问会失败
+    (实测:一次性判定会让用例整条跳过)。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        rect = _query_tray_rect(pid)
+        if rect is not None:
+            return rect
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.2)
+
+
+def _query_tray_rect(pid: int) -> tuple[int, int, int, int] | None:
+    for hwnd in windows_of(pid):
+        if TRAY_CLASS_HINT not in class_of(hwnd):
+            continue
+        for uid in (0, 1, 2, 3):  # uID 实测是 0,留几个备选免得 Qt 改实现
+            guid = (ctypes.c_byte * 16)()
+            ident = NOTIFYICONIDENTIFIER(ctypes.sizeof(NOTIFYICONIDENTIFIER), hwnd, uid, guid)
+            rect = wintypes.RECT()
+            if _shell32.Shell_NotifyIconGetRect(ctypes.byref(ident), ctypes.byref(rect)) != 0:
+                continue
+            if (rect.left, rect.top, rect.right, rect.bottom) != (0, 0, 0, 0):
+                return rect.left, rect.top, rect.right, rect.bottom
+    return None
+
+
+def center_of_rect(rect: tuple[int, int, int, int]) -> tuple[int, int]:
+    left, top, right, bottom = rect
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def click_at(x: int, y: int, *, right: bool = False) -> None:
+    """在屏幕坐标处真点一下;光标被外部挪走就抛 InterferenceError。"""
+    if left_button_down():
+        raise InterferenceError("左键在动作前已被按下")
+    place(x, y)
+    down, up = (RIGHTDOWN, RIGHTUP) if right else (LEFTDOWN, LEFTUP)
+    _send(_mouse(down))
+    time.sleep(0.05)
+    _send(_mouse(up))
