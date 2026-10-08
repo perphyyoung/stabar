@@ -963,12 +963,19 @@ class TrayIcon(QSystemTrayIcon):
         # 文字来自每个 QAction 自己的 setToolTip —— 没设的项,开了也没有提示可显示
         self._menu.setToolTipsVisible(True)
 
-        self._visibility = self._menu.addAction("隐藏", self._toggle_visible)
-        self._visibility.setToolTip("显示 / 隐藏小组件(隐藏后只能从托盘恢复)")
-        self._menu.addAction("立即刷新", window.refresh).setToolTip("立刻读一次磁盘占用")
+        # 菜单顺序:容易被误触的勾选项放**最上**,四行控件居中,**常用项靠下**贴近「退出」。
+        # 位置完全由下面几段的调用先后决定 —— 想调顺序就是调它们的先后。
+        self._click_through = self._menu.addAction("鼠标穿透")
+        self._click_through.setCheckable(True)
+        self._click_through.setToolTip("开启后窗口不再接收鼠标,只能从本菜单关掉")
+        self._click_through.toggled.connect(window.set_click_through)
 
-        # 四行控件(位置由这里的调用点决定):刷新频率紧跟"立即刷新",三个步进器挨在一起,
-        # 透明度排在两条警戒线之后,再往后才是勾选项
+        self._autostart = self._menu.addAction("开机自启")
+        self._autostart.setCheckable(True)
+        self._autostart.setToolTip("写当前用户的注册表 Run 键,可回本菜单取消")
+        self._autostart.toggled.connect(self._set_autostart)
+
+        # 四行控件(顺序固定):刷新频率、橙色阈值、红色阈值、常亮阈值、透明度
         # 控件行容器 / 行内控件 各自指向该行的 action(见 eventFilter、_release_row_focus)
         self._row_actions: dict[QWidget, QAction] = {}
         self._row_controls: dict[QWidget, QAction] = {}
@@ -985,15 +992,10 @@ class TrayIcon(QSystemTrayIcon):
             spin.setFixedWidth(widest)
         self._sync_threshold_rows()
 
-        self._click_through = self._menu.addAction("鼠标穿透")
-        self._click_through.setCheckable(True)
-        self._click_through.setToolTip("开启后窗口不再接收鼠标,只能从本菜单关掉")
-        self._click_through.toggled.connect(window.set_click_through)
-
-        self._autostart = self._menu.addAction("开机自启")
-        self._autostart.setCheckable(True)
-        self._autostart.setToolTip("写当前用户的注册表 Run 键,可回本菜单取消")
-        self._autostart.toggled.connect(self._set_autostart)
+        # 常用项靠下:贴着「退出」,不必在菜单里长距离找
+        self._visibility = self._menu.addAction("隐藏", self._toggle_visible)
+        self._visibility.setToolTip("显示 / 隐藏小组件(隐藏后只能从托盘恢复)")
+        self._menu.addAction("立即刷新", window.refresh).setToolTip("立刻读一次磁盘占用")
 
         self._menu.addSeparator()
         self._menu.addAction("退出", QApplication.quit).setToolTip("退出 stabar")

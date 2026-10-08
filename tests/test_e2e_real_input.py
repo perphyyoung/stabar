@@ -66,6 +66,13 @@ BASE = Path(__file__).resolve().parent.parent
 EXE = BASE / "dist" / "stabar" / "stabar.exe"
 TARGET = os.environ.get("STABAR_E2E_TARGET", "exe")  # dev = 跑源码形态,不必打包
 
+# 键盘落到第几项:菜单刚打开时没有高亮项,按 N 次 ↓ 走到第 N 项(分隔线跳过;按多了会绕回开头)。
+# **两个菜单不是同一个**:小组件自己那份只有三项;托盘那份含控件行,顺序见 `TrayIcon.__init__`,
+# 由第 2 层的 `test_menu_items_and_order` 钉着 —— 改托盘顺序就要改 ITEM_TRAY_HIDE。
+ITEM_WINDOW_HIDE = 1  # 小组件菜单:隐藏 / 立即刷新 / ─── / 退出
+ITEM_WINDOW_QUIT = 3
+ITEM_TRAY_HIDE = 8  # 托盘菜单:鼠标穿透 / 开机自启 / 刷新频率 / 橙红常亮三阈值 / 透明度 / 隐藏
+
 pytestmark = [
     pytest.mark.skipif(
         os.environ.get("STABAR_E2E") != "1",
@@ -184,7 +191,7 @@ def test_real_right_click_hides_window(app) -> None:
     guarded(lambda: right_click(app.hwnd))
     assert app.wait("event=menu open=context", 3), "右键没有弹出菜单"
 
-    tap_keys(VK_DOWN)  # 菜单刚打开没有高亮,第一次按下键 = 第一项「隐藏」
+    tap_keys(*[VK_DOWN] * ITEM_WINDOW_HIDE)  # 一个 ↓ 就到「隐藏」
     tap_keys(VK_RETURN)
     assert app.wait("event=window state=hidden", 3), "日志里没有 state=hidden"
 
@@ -197,7 +204,7 @@ def test_menu_quit_exits_process_gracefully(app) -> None:
     guarded(lambda: right_click(app.hwnd))
     assert app.wait("event=menu open=context", 3), "右键没有弹出菜单"
 
-    tap_keys(VK_DOWN, VK_DOWN, VK_DOWN)  # 隐藏 → 立即刷新 → 退出(分隔符会被跳过)
+    tap_keys(*[VK_DOWN] * ITEM_WINDOW_QUIT)  # 隐藏 → 立即刷新 → 退出(分隔线跳过)
     tap_keys(VK_RETURN)
     assert app.wait("event=menu item=退出", 3), "没选到退出"
     assert app.wait("event=stop", 3), "没有 stop 事件,说明不是优雅退出"
@@ -248,7 +255,7 @@ def test_real_tray_menu_hides_window(app) -> None:
     guarded(lambda: click_at(*center_of_rect(rect), right=True))
     assert app.wait("event=menu open=tray", 3), "右键托盘图标没有弹出菜单"
 
-    tap_keys(VK_DOWN)  # 菜单刚打开没有高亮项,第一次按下键 = 第一项「隐藏」
+    tap_keys(*[VK_DOWN] * ITEM_TRAY_HIDE)  # 托盘菜单长:一路 ↓ 到「隐藏」(见 ITEM_TRAY_HIDE)
     tap_keys(VK_RETURN)
     assert app.wait("event=window state=hidden", 3), "日志里没有 state=hidden"
 

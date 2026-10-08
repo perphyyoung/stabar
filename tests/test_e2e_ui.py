@@ -56,6 +56,8 @@ def test_context_menu_lists_items(window, events) -> None:
     window.show()
     items = open_context_menu(window)
 
+    # 这是**小组件自己**的右键菜单(隐藏 / 立即刷新 / 退出),与托盘的菜单是两个:
+    # 托盘那份含控件行、顺序见 `test_tray.py::test_menu_items_and_order`
     assert items[0] == "隐藏"
     assert "立即刷新" in items
     assert items[-1] == "退出"

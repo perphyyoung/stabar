@@ -143,15 +143,15 @@ def test_wheel_over_rows_does_not_change_values(window, tray) -> None:
 
 def test_menu_items_and_order(tray) -> None:
     assert [action.text() for action in tray._menu.actions()] == [
-        "隐藏",
-        "立即刷新",
+        "鼠标穿透",  # 勾选项放最上:不容易误触
+        "开机自启",
         "刷新频率",  # 步进器那一行(QWidgetAction;控件本身在屏幕上另有文字)
         "橙色阈值",  # 步进器,同上
         "红色阈值",  # 步进器,同上
         "常亮阈值",  # 步进器,同上
         "透明度",  # 滑杆那一行,同上
-        "鼠标穿透",
-        "开机自启",
+        "隐藏",  # 常用项靠下,贴着"退出"
+        "立即刷新",
         "",  # 分隔线
         "退出",
     ]
