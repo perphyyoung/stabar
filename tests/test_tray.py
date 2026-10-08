@@ -108,7 +108,7 @@ def test_menu_reopens_without_row_focus(window, tray) -> None:
     """
     menu = tray.contextMenu()
     spin = tray._threshold_spins["warn"]
-    first = menu.actions()[0]
+    first = next(action for action in menu.actions() if not action.isSeparator())
 
     menu.popup(QPoint(400, 300))
     try:

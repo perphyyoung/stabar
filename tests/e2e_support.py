@@ -18,6 +18,7 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
+import uiautomation as auto  # 只有真输入 E2E 用得到(见文件末尾),uv 会一并带上它依赖的 comtypes
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 
@@ -375,3 +376,73 @@ def click_at(x: int, y: int, *, right: bool = False) -> None:
     _send(_mouse(down))
     time.sleep(0.05)
     _send(_mouse(up))
+
+
+# ======================================================================
+# 按名称选菜单项:UI Automation(只有 B 层用)
+#
+# 以前是"按 N 次 ↓ 选第 N 项",那个 N 是菜单里的**位置**:菜单一重排就失效,而且是手工数出来的
+# (实测数错过一次:写 10 而「隐藏」在第 11 项,因为 E2E 默认 skip,错了很久没人发现)。
+#
+# 改用 Windows 给辅助技术与自动化测试的正式接口 —— UI Automation。Qt 把菜单暴露得很完整
+# (进程外实测,宿主与查探是两个进程):
+#
+#     Class='QMenu'   ← 菜单窗口
+#       ├ Name='隐藏'     Class='QAction'       Type=MenuItemControl   ← 名字就是 QAction.text()
+#       ├ Name='透明度行' Class='QWidgetAction' Type=MenuItemControl   ← 控件行同样有名字
+#       └ Name=''        Class='QAction'       Type=SeparatorControl
+#
+# 于是"选哪一项"按键名定位,与它在菜单里的顺序**无关**。两条实测注意:
+#   1. Qt **不**提供 UIA 的 Invoke 模式(取到的是 None),所以只能 `Click()` —— 它走真实鼠标
+#      (SetCursorPos + SendInput),恰好正是这一层要的;
+#   2. 菜单里有的文字会变(隐藏 / 显示),所以按**正则**匹配。
+#
+# 官方依据:Qt《Accessibility》—— Qt 通过平台 API 把 GUI 语义暴露给辅助技术,菜单项的名字取自
+# `QAction::text()`,且**不需要开关**(辅助技术发 WM_GETOBJECT 时按需创建)。
+# ======================================================================
+
+MENU_CLASS = "QMenu"
+
+
+def visible_menu():
+    """当前可见的菜单窗口;没有就返回 None。
+
+    只认**可见**的:程序里另一个菜单(小组件自己的右键菜单)同类名,没弹出时也可能在树里,
+    那份坐标是陈旧的,点下去会点到空处。
+    """
+    for window in auto.GetRootControl().GetChildren():
+        if window.ClassName == MENU_CLASS and not window.IsOffscreen:
+            return window
+    return None
+
+
+def visible_menu_names() -> list[str]:
+    """当前可见菜单里的项名(找不到项时打进断言消息,便于一步定位)。"""
+    menu = visible_menu()
+    return [child.Name for child in menu.GetChildren()] if menu else []
+
+
+def click_menu_item(pattern: str, timeout: float = 5.0, *, closes_menu: bool = True) -> str:
+    """在**当前可见的菜单**里按键名正则找到一项、真点它,返回点到的名字。
+
+    找不到则断言失败(附上当时菜单里的项名);点完菜单没关说明多半被真人鼠标干扰 —— 抛
+    `InterferenceError`,交给调用方的 `guarded()` 重试或跳过,而不是记成失败。
+
+    `closes_menu=False` 用于"点完程序就退出"的项(如「退出」):那时**菜单窗口还在**(进程正在退),
+    不能拿"菜单没关"当点空了(实测踩到过:把它误判成干扰,重试时程序已经没了,用例反而失败)。
+    """
+    if left_button_down():
+        raise InterferenceError("左键在动作前已被按下")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        menu = visible_menu()
+        if menu is not None:
+            item = menu.MenuItemControl(RegexName=pattern, searchDepth=1)
+            if item.Exists(0.5, 0.1):
+                name = str(item.Name)
+                item.Click()  # 真鼠标
+                if closes_menu and item.Exists(0.5, 0.1):  # 菜单没关 = 点空了
+                    raise InterferenceError(f"点完「{name}」菜单还在,可能被真人鼠标干扰")
+                return name
+        time.sleep(0.1)
+    raise AssertionError(f"当前菜单里没有匹配 {pattern!r} 的项:{visible_menu_names()}")

@@ -3,10 +3,12 @@
 默认跳过,手动开启:
 
 ```powershell
-uv run pyinstaller --noconfirm --clean stabar.spec   # 先打包(或用下面的 dev 形态免打包)
-$env:STABAR_E2E = "1"                                 # 再开开关
-uv run pytest tests/test_e2e_real_input.py -q
-$env:STABAR_E2E_TARGET = "dev"                        # 可选:改跑源码形态,不必打包
+# 源码形态(常规):免打包;多条环境变量之间用 ;(赋值不能跟在 && 后面)
+$env:STABAR_E2E = "1"; $env:STABAR_E2E_TARGET = "dev"; uv run pytest tests/test_e2e_real_input.py -q
+
+# 打包形态:只有要验证打包自身时才跑;不设目标时它本来就是默认目标
+uv run pyinstaller --noconfirm --clean stabar.spec
+$env:STABAR_E2E = "1"; uv run pytest tests/test_e2e_real_input.py -q
 ```
 
 **会真的移动你的鼠标、抢焦点,所以必须有真实桌面会话**(headless CI 上跑不了)。
@@ -21,6 +23,10 @@ $env:STABAR_E2E_TARGET = "dev"                        # 可选:改跑源码形�
 这一层存在的理由,是它覆盖 A 层覆盖不到的四件事:隐形命中层是否真的接住鼠标、
 操作系统把右键转成上下文菜单的那一层、**系统托盘那一侧**(点击真的送到了图标上)、
 以及真实退出路径。
+
+**选菜单项一律按名称**:用 UI Automation 找到那一项再真点(`e2e_support.click_menu_item`),
+与它在菜单里的位置**无关**。以前是"按 N 次 ↓ 到第 N 项",那个 N 得手工数、菜单一重排就失效
+(而且真数错过一次:写 10,而「隐藏」在第 11 项)。
 
 日志按设计只有两份(打包后 / 其他):打包产物写 `%LOCALAPPDATA%\\stabar\\stabar.log`,而且
 **不理会** `STABAR_CONFIG_DIR`(那个变量只隔离配置)。所以这里要按真实路径找日志,并按偏移量只读
@@ -39,13 +45,12 @@ from types import SimpleNamespace
 
 import pytest
 from e2e_support import (
-    VK_DOWN,
-    VK_RETURN,
     InterferenceError,
     assert_in_order,
     center_of_rect,
     class_of,
     click_at,
+    click_menu_item,
     drag,
     find_window,
     is_visible,
@@ -53,7 +58,6 @@ from e2e_support import (
     read_since,
     rect_of,
     right_click,
-    tap_keys,
     tray_icon_rect,
     wait_for_event,
     windows_of,
@@ -66,21 +70,17 @@ BASE = Path(__file__).resolve().parent.parent
 EXE = BASE / "dist" / "stabar" / "stabar.exe"
 TARGET = os.environ.get("STABAR_E2E_TARGET", "exe")  # dev = 跑源码形态,不必打包
 
-# 键盘落到第几项:菜单刚打开时没有高亮项,按 N 次 ↓ 走到第 N 项(分隔线跳过;按多了会绕回开头)。
-# **两个菜单不是同一个**:小组件自己那份只有三项;托盘那份含控件行,顺序见 `TrayIcon.__init__`,
-# 由第 2 层的 `test_menu_items_and_order` 钉着 —— 改托盘顺序就要改 ITEM_TRAY_HIDE。
-ITEM_WINDOW_HIDE = 1  # 小组件菜单:隐藏 / 立即刷新 / ─── / 退出
-ITEM_WINDOW_QUIT = 3
-ITEM_TRAY_HIDE = 9  # 鼠标穿透 / 调整尺寸 / 开机自启 / 还原配置 / 刷新频率 / 三阈值 / 透明度 / 隐藏
-
 pytestmark = [
     pytest.mark.skipif(
         os.environ.get("STABAR_E2E") != "1",
-        reason="真输入 E2E 需手动开启:先打包(或设 STABAR_E2E_TARGET=dev),再设 STABAR_E2E=1",
+        reason=(
+            "真输入 E2E 需手动开启:设 STABAR_E2E=1 再跑 —— 常规跑源码形态"
+            "(再加 STABAR_E2E_TARGET=dev),验证打包形态就先打包(见 README 的「测试」)"
+        ),
     ),
     pytest.mark.skipif(
         TARGET != "dev" and not EXE.exists(),
-        reason=f"先打包,产物不存在:{EXE}(或设 STABAR_E2E_TARGET=dev 跑源码形态)",
+        reason=f"没打包,产物不存在:{EXE} —— 要么先打包,要么设 STABAR_E2E_TARGET=dev 跑源码形态",
     ),
 ]
 
@@ -187,12 +187,11 @@ def test_drag_moves_window_and_saves_position(app) -> None:
 
 
 def test_real_right_click_hides_window(app) -> None:
-    """真右键 → 菜单 → 键盘选「隐藏」:覆盖"OS 把右键转成上下文菜单"的那一层。"""
+    """真右键 → 菜单 → 按名称点「隐藏」:覆盖"OS 把右键转成上下文菜单"的那一层。"""
     guarded(lambda: right_click(app.hwnd))
     assert app.wait("event=menu open=context", 3), "右键没有弹出菜单"
 
-    tap_keys(*[VK_DOWN] * ITEM_WINDOW_HIDE)  # 一个 ↓ 就到「隐藏」
-    tap_keys(VK_RETURN)
+    guarded(lambda: click_menu_item("隐藏|显示"))  # 按名称点,不用数「第几项」
     assert app.wait("event=window state=hidden", 3), "日志里没有 state=hidden"
 
     assert is_visible(app.hwnd) == 0  # 外部事实:窗口真的不可见了
@@ -204,8 +203,7 @@ def test_menu_quit_exits_process_gracefully(app) -> None:
     guarded(lambda: right_click(app.hwnd))
     assert app.wait("event=menu open=context", 3), "右键没有弹出菜单"
 
-    tap_keys(*[VK_DOWN] * ITEM_WINDOW_QUIT)  # 隐藏 → 立即刷新 → 退出(分隔线跳过)
-    tap_keys(VK_RETURN)
+    guarded(lambda: click_menu_item("退出", closes_menu=False))  # 点完进程就开始退,菜单还在
     assert app.wait("event=menu item=退出", 3), "没选到退出"
     assert app.wait("event=stop", 3), "没有 stop 事件,说明不是优雅退出"
 
@@ -255,8 +253,7 @@ def test_real_tray_menu_hides_window(app) -> None:
     guarded(lambda: click_at(*center_of_rect(rect), right=True))
     assert app.wait("event=menu open=tray", 3), "右键托盘图标没有弹出菜单"
 
-    tap_keys(*[VK_DOWN] * ITEM_TRAY_HIDE)  # 托盘菜单长:一路 ↓ 到「隐藏」(见 ITEM_TRAY_HIDE)
-    tap_keys(VK_RETURN)
+    guarded(lambda: click_menu_item("隐藏|显示"))  # 托盘菜单长,按名称点省去数项
     assert app.wait("event=window state=hidden", 3), "日志里没有 state=hidden"
 
     assert is_visible(app.hwnd) == 0  # 外部事实

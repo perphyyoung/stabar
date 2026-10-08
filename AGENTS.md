@@ -18,6 +18,9 @@ uv run pytest -q     # 4. 跑测试
   ```powershell
   ruff check --fix && ruff format && ruff check && uv run pytest -q
   ```
+- **例外是"赋值"**:`$env:A = "1" && $env:B = "2"` 会直接报 `ParserError` —— `&&` 右边必须是
+  pipeline,而赋值不是(实测 PS 7.6.6)。连续赋环境变量写成
+  `$env:A = "1"; $env:B = "2"; uv run …`(`README.md` 的「测试」就是这么写的)。
 - `ruff format` 必须放在 `ruff check --fix` **之后**:自动修复可能重排代码,格式化要在最终
   形态上做,否则两者会互相推翻。
 - 测试在 `tests/`(`uv run pytest -q`),改完必须全过。它跑在离屏 Qt 上
@@ -72,14 +75,20 @@ uv run pytest -q     # 4. 跑测试
 - **日志只有两份**(打包后 / 其他),测试直接写**项目目录**那一份、**不隔离**。所以断言一律用
   `events()` / `log_text()`(已按偏移量切),**不要直接读整个文件** —— 那会读到别的用例或你自己的
   dev 运行写下的事件,造成假通过。第 4 层读打包后那份,同样按偏移量切(`e2e_support.read_since`)。
-- **第 4 层**:默认 skip;要跑先打包,再 `$env:STABAR_E2E = "1"`。默认跑**打包产物**,但改动落在纯逻辑上时
-  可以 `$env:STABAR_E2E_TARGET = "dev"` 改跑源码形态、免去每次打包 —— 这一层的不变量(命中层、OS 右键、
-  shell 转发托盘点击)与是否打包无关,打包形态自身的差异不属于这层(见 `开发经验.md` 第 28、29 条)。
-  它会真的移动鼠标、抢焦点,必须有真实桌面会话。两条必须遵守:
+- **第 4 层**:默认 skip。两种跑法(完整命令见 `README.md` 的「测试」):
+  - **源码形态**(常规):`$env:STABAR_E2E = "1"; $env:STABAR_E2E_TARGET = "dev"` —— 这一层的不变量
+    (命中层、OS 右键、shell 转发托盘点击)与是否打包无关,改动落在纯逻辑上时**不必每次打包**;
+  - **打包形态**(只有要验证打包自身时):先 `pyinstaller` 再 `$env:STABAR_E2E = "1"`(不设
+    `STABAR_E2E_TARGET` 时的默认目标)。打包形态自身的差异见 `开发经验.md` 第 28、29 条。
+  它会真的移动鼠标、抢焦点,必须有真实桌面会话。三条必须遵守:
   - 给子进程透传环境时 **`env.pop("QT_QPA_PLATFORM", None)`** —— 否则子进程会去找打包时已被裁掉的
     offscreen 插件、启动即死(见 `开发经验.md` 第 24 条);
   - 动作一律用 `e2e_support` 的 `place()` / `guarded()`:检测到真人鼠标在动就**重试、再 skip**,
-    **绝不记成失败** —— 假失败比没有测试更坏。
+    **绝不记成失败** —— 假失败比没有测试更坏;
+  - **选菜单项一律按名称**:`e2e_support.click_menu_item("隐藏|显示")`(UI Automation)。**不要**
+    "按 N 次 ↓ 数第几项" —— 那个数是菜单里的**位置**,菜单一重排就失效,而且实测数错过一次。
+    dev 依赖 `uiautomation` 就是为它加的,它的 `Click()` 走真实鼠标;文字会变的项用正则匹配,
+    点完**程序会退出**的项(如「退出」)传 `closes_menu=False`(见 `开发经验.md` 第 42 条)。
 - **断言成对(第 3、4 层)**:结论涉及"真的隐藏 / 真的移动"时,断言 = 日志事件(程序自己的声明)
   **+ 一条外部事实**(`IsWindowVisible` / ini 里的 `pos_x`)。只用日志等于"验证代码和日志犯同一个错"
   (原理见 `日志使用说明.md` 第七节)。
@@ -91,7 +100,7 @@ uv run pytest -q     # 4. 跑测试
 | `window` / `low_usage` / `fake_registry` | 配置已隔离的窗口;读盘固定成 10%(确定的"最暗档");假 `winreg`,可断言写入内容 |
 | `app_log` / `events` | 配置与日志都落到 `tmp_path`、级别开到 DEBUG(退出自动还原);`events()` 把日志读成事件行列表 |
 | `qtbot` | pytest-qt 自带:注册控件、`waitUntil`、模拟事件 |
-| `tests/e2e_support.py` | 日志解析(第 2~4 层共用)+ 真输入 ctypes(只有第 4 层用)。**不要在各测试文件里再抄一份** |
+| `tests/e2e_support.py` | 日志解析(第 2~4 层共用)+ 真输入 ctypes + 按名称点菜单项 `click_menu_item()`(UI Automation,只有第 4 层用)。**不要在各测试文件里再抄一份** |
 
 ### 提交前自查
 

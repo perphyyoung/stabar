@@ -91,6 +91,38 @@ $env:STABAR_LOG_LEVEL = "DEBUG"    # 排查用;大小写不敏感,重启进程�
 打包成 `--noconsole` 后 `sys.stderr` 是 `None`,所以**不要用 `print(..., file=sys.stderr)`
 报错信息 —— 它会静默消失**,要写成日志。
 
+## 测试
+
+**1. 单元测试(默认,含进程内 A 层 E2E)** —— 离屏 Qt,不弹真窗口、不碰真实 `stabar.ini` 与真实注册表:
+
+```powershell
+uv run pytest -q -rs
+```
+
+**2. 源码形态 E2E** —— 进程外真输入(会真的移动鼠标、抢焦点,必须有真实桌面会话),**不必打包**:
+
+```powershell
+$env:STABAR_E2E = "1"; $env:STABAR_E2E_TARGET = "dev"; uv run pytest tests/test_e2e_real_input.py -q
+```
+
+**3. 打包形态 E2E** —— 只有要验证**打包形态自身**时才跑;不设 `STABAR_E2E_TARGET` 时它本来就是默认目标:
+
+```powershell
+uv run pyinstaller --noconfirm --clean stabar.spec
+$env:STABAR_E2E = "1"; uv run pytest tests/test_e2e_real_input.py -q
+```
+
+三点说明:
+
+- 新增用例该写在哪一层(纯函数 / 组件 / 进程内 E2E / 进程外真输入 E2E)见
+  [`AGENTS.md`](AGENTS.md) 的「测试分层」;
+- 多条环境变量之间用 **`;` 而不是 `&&`**:`&&` 右边必须是 pipeline,而赋值不是 —— 实测直接
+  `ParserError`(见 `AGENTS.md` 的「代码检查与格式化」);
+- 开关留在**当前会话**里(想清掉:`Remove-Item Env:STABAR_E2E`);没打包就跑第 3 种会整份 skip,不是失败。
+
+两个设计上的注意:选菜单项按**名称**定位(UI Automation),与菜单顺序无关;检测到你在用鼠标时会重试、
+再整体跳过,**不会记成失败**。
+
 ## 打包
 
 ```powershell
@@ -126,10 +158,12 @@ Quick/Qml/Pdf/Network/OpenGL/Svg、Mesa 软件 OpenGL 回退、Qt 翻译、图�
 
 ```
 main.py                          应用装配与界面:窗口、盘条、托盘、入口
+dialogs.py                       自绘小对话框(无边框 + 自绘标题栏)
 logging_setup.py                 日志:级别策略、落盘、Qt 消息桥接、异常钩子
 日志使用说明.md                  日志级别、位置、事件清单与自动化测试用法
 开发经验.md                      踩过的坑与实测结论(现象 → 原因 → 做法,标注证据来源)
-tests/                           pytest 用例(离屏 Qt,不碰真实配置与注册表)
+AGENTS.md                        协作约定:代码检查、测试分层、提交信息
+tests/                           pytest 用例(离屏 Qt,不碰真实配置与注册表);两份 E2E 见「测试」一节
 stabar.ico                       图标文件:托盘与 exe 共用(由 scripts/make-icon.py 生成)
 stabar.spec                      PyInstaller 规格:onedir + Qt 裁剪 + 嵌入图标
 scripts/make-icon.py             图标设计 + 生成 stabar.ico
