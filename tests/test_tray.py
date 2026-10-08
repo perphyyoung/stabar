@@ -1,8 +1,9 @@
 """TrayIcon:菜单内容与顺序、透明度滑杆、刷新步进器、勾选联动、显示切换、提示文字。"""
 
 import pytest
+from e2e_support import mouse_event
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QColor, QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton
 
 import dialogs
@@ -235,18 +236,6 @@ def test_reset_row_reports_when_nothing_to_reset(window, tray) -> None:
         menu.close()
 
 
-def mouse_event(kind, local: QPoint, global_pos: QPoint) -> QMouseEvent:
-    """造一个左键鼠标事件(拖动用例用):局部坐标与屏幕坐标都给全。"""
-    return QMouseEvent(
-        kind,
-        QPointF(local),
-        QPointF(global_pos),
-        Qt.MouseButton.LeftButton,
-        Qt.MouseButton.LeftButton,
-        Qt.KeyboardModifier.NoModifier,
-    )
-
-
 def test_reset_dialog_draws_its_own_title_bar() -> None:
     """自绘标题栏:无边框、标题左右居中、没有多余的 ✕,按住标题栏还能拖动。
 
@@ -288,6 +277,7 @@ def test_menu_items_and_order(tray) -> None:
         "橙色阈值",  # 步进器,同上
         "红色阈值",  # 步进器,同上
         "常亮阈值",  # 步进器,同上
+        "调整尺寸",  # 滑杆那一行(缩放在透明度紧上方)
         "透明度",  # 滑杆那一行,同上
         "隐藏",  # 常用项靠下,贴着"退出"
         "立即刷新",
@@ -352,6 +342,23 @@ def test_switches_are_checkbox_rows_not_checkable_items(tray) -> None:
         assert tray._row_controls[box].text() == name  # 是控件行,不是菜单项
         margins = box.parentWidget().layout().contentsMargins()
         assert margins.left() == margins.right() == main.MENU_ITEM_INDENT  # 左右留白相等
+
+
+def test_scale_slider_matches_window_value(window, tray, tmp_path) -> None:
+    """尺寸滑杆:量程 60% ~ 200%、一格 1%,弹出时对齐生效值;拖动预览、提交落盘。"""
+    assert tray._scale_slider.minimum() == round(main.UI_SCALE_MIN * 100)
+    assert tray._scale_slider.maximum() == round(main.UI_SCALE_MAX * 100)
+
+    window.set_ui_scale(1.5)  # 窗口侧改过之后,菜单打开时该对齐
+    tray._sync_state()
+    assert tray._scale_slider.value() == 150
+    assert tray._scale_value.text() == "150%"
+
+    tray._scale_slider.setValue(80)  # 拖动:立刻预览
+    assert window.ui_scale == pytest.approx(0.8)
+
+    tray._commit_scale()  # 松手:落盘
+    assert "ui_scale=0.8" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
 
 
 def test_opacity_slider_matches_window_value(window, tray) -> None:

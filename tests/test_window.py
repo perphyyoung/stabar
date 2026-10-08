@@ -5,7 +5,9 @@
 """
 
 import pytest
-from e2e_support import assert_in_order  # 只借日志解析那半部分(见该模块说明)
+from e2e_support import (
+    assert_in_order,  # 只借日志解析那半部分(见该模块说明)
+)
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
@@ -129,6 +131,27 @@ def test_click_through_toggles_flag_and_logs(window, events) -> None:
     assert_in_order(
         events(), "event=click_through enabled=True", "event=click_through enabled=False"
     )
+
+
+def test_ui_scale_resizes_window_bars_and_persists(window, tmp_path) -> None:
+    """缩放系数:窗口与每个盘条一起变;落盘写进 ini(下次启动由它还原)。"""
+    base = window.size()
+    window.set_ui_scale(1.5)
+
+    assert window.size().width() == round(base.width() * 1.5)
+    assert abs(window.size().height() - round(base.height() * 1.5)) <= 2  # 各段分别取整
+    assert window._bars[0].height() == round(main.ROW_H * 1.5)
+    assert "ui_scale=1.5" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+    # 与窗口位置同理:它算几何不算配置,所以「还原配置」不管它
+    assert "ui_scale" not in {key for key, *_ in main.RESETTABLE_SETTINGS}
+
+
+def test_ui_scale_is_clamped(window) -> None:
+    """拖到极限就停住:下限防"小到看不见",上限防"占满屏"。"""
+    window.set_ui_scale(9.0)
+    assert window.ui_scale == pytest.approx(main.UI_SCALE_MAX)
+    window.set_ui_scale(0.01)
+    assert window.ui_scale == pytest.approx(main.UI_SCALE_MIN)
 
 
 def test_hide_widget_clears_hover_state(window) -> None:

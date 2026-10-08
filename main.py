@@ -107,11 +107,18 @@ PAD = 6
 GAP = 6
 EDGE_MARGIN = 24
 
+# --- 整窗缩放(托盘「调整尺寸」滑杆调)---
+# 存的是**系数**而不是像素:窗口高度是"盘数 × 行高"推出来的,存绝对高会跟盘数打架;而上面的
+# WINDOW_W / ROW_H / PAD / GAP 本来就是一套常量,乘同一个系数最自然。
+UI_SCALE_DEFAULT = 1.0
+UI_SCALE_MIN = 0.6  # 再小就看不清了
+UI_SCALE_MAX = 2.0  # 再大就占满屏
+SCALE_UNIT = 0.01  # 滑杆一格 = 1%
+
 # --- 托盘菜单 ---
 # 控件行(滑杆 / 开关 / 按钮)没有菜单项那段缩进,要自己补上左边距才能与其它行文字左对齐。
 # 实测(抓图 + 像素扫描):菜单里**没有可勾选项**之后,纯文字项从面板边缘 10~11px 处开始;
 # 控件行自己补 8 的左边距正好落在同一列(量出来 11)。左右取同一个值,两侧留白也就相等了。
-# 从前有原生勾选项时是 27(面板 3 + 勾选列 20 + 间距 4)。
 MENU_ITEM_INDENT = 8
 SLIDER_WIDTH = 96  # 滑杆长度:够细调即可,太长会把整个菜单撑宽
 # 三行阈值步进器:(行标签, action 名, hover 提示, 内部键)。这个顺序就是菜单里的顺序。
@@ -221,6 +228,7 @@ def lerp(a: float, b: float, t: float) -> float:
 
 
 def with_alpha(rgb: tuple[int, int, int], alpha: float) -> QColor:
+    """给颜色换一个 alpha。**alpha 是 0~255,不是 0~1** —— 写 0.55 会被取整成 1(几乎看不见)。"""
     color = QColor(*rgb)
     color.setAlpha(max(0, min(255, round(alpha))))
     return color
@@ -239,6 +247,19 @@ def is_lit(max_ratio: float, lit: float, danger: float) -> bool:
 def percent_text(value: float) -> str:
     """把 0.85 这样的值写成给人看的百分比(滑杆右侧标签、还原框里的阈值共用)。"""
     return f"{round(value * 100)}%"
+
+
+def scale_units(scale: float) -> int:
+    """缩放系数 -> 滑杆格数(一格 1%,所以格数就是百分数)。"""
+    return min(
+        round(UI_SCALE_MAX / SCALE_UNIT),
+        max(round(UI_SCALE_MIN / SCALE_UNIT), round(scale / SCALE_UNIT)),
+    )
+
+
+def scale_from_units(units: int) -> float:
+    """滑杆格数 -> 缩放系数。"""
+    return min(UI_SCALE_MAX, max(UI_SCALE_MIN, units * SCALE_UNIT))
 
 
 # 托盘菜单「还原配置」管的就是这几项:(ini 键, 显示名, 默认值, 把值写成给人看的文本)。
@@ -421,6 +442,7 @@ class DiskBar(QWidget):
         # 让父窗口统一接收鼠标事件,拖动和悬停都更简单
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.setFixedHeight(ROW_H)
+        self._scale = UI_SCALE_DEFAULT  # 由窗口下发,见 set_scale
 
     # ---- 数据 ----
     def reload(self) -> None:
@@ -471,11 +493,20 @@ class DiskBar(QWidget):
         self._warned = ratio >= floor
         return with_alpha(COLOR_WARN if self._warned else COLOR_ACCENT, self._alpha)
 
+    def set_scale(self, scale: float) -> None:
+        """整窗缩放:只需设高度,其余交给绘制变换 —— 见 `paintEvent` 开头。"""
+        self._scale = scale
+        self.setFixedHeight(max(1, round(ROW_H * scale)))
+        self.update()
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        w, h = self.width(), self.height()
+        # 绘制代码一律按**基准像素**写(26 / 32 / 8 那些),缩放由画布变换完成 —— 这样加一个
+        # 像素常量不必再记得"要不要乘系数",也不会漏。字号同理:9pt 经变换就是 9·s 的效果,
+        # 不必去 setPointSizeF(缩小时还会触发 QFont 的"点大小必须 > 0"警告)。
+        painter.scale(self._scale, self._scale)
+        w, h = self.width() / self._scale, self.height() / self._scale
         text_color = with_alpha(BASE_TEXT, self._alpha)
         dim_color = with_alpha(BASE_DIM, self._alpha)
         outline = with_alpha(OUTLINE_RGB, self._alpha)
@@ -545,6 +576,9 @@ class StatusBarWindow(QWidget):
 
         self._settings = QSettings(str(settings_path()), QSettings.IniFormat)
         self._drag_offset: QPoint | None = None
+        # 整窗缩放:记住生效值;托盘滑杆拖动时只预览,松手 / 关菜单才提交
+        self._ui_scale = self._read_ui_scale()
+        self._saved_ui_scale = self._ui_scale
 
         # 提亮程度:唯一的动画变量,0 = 平时的最暗档
         self._level = 0.0
@@ -592,6 +626,9 @@ class StatusBarWindow(QWidget):
             # 让盘条不接收鼠标事件,悬停统一归窗口,整块区域都能弹(不必逐个给子控件设 tooltip)。
             bar.setAttribute(Qt.WA_TransparentForMouseEvents)
             self._bars.append(bar)
+
+        # 记住的缩放立刻生效(窗口尺寸 + 每个盘条的位置与高度)
+        self.apply_scale(self._ui_scale)
 
         self._anim = QVariantAnimation(self)
         self._anim.setDuration(FADE_MS)
@@ -936,6 +973,55 @@ class StatusBarWindow(QWidget):
         self.hide()
         log.info("event=window state=hidden")
 
+    # ---- 整窗缩放(托盘「调整尺寸」滑杆)----
+    def _read_ui_scale(self) -> float:
+        """读记住的缩放系数。非法值退回默认,越界夹取并留痕(与其它配置项一套做法)。"""
+        try:
+            value = float(self._settings.value("ui_scale", UI_SCALE_DEFAULT))
+        except (TypeError, ValueError):
+            log.warning("event=config_invalid key=ui_scale fallback=%s", UI_SCALE_DEFAULT)
+            return UI_SCALE_DEFAULT
+        clamped = min(UI_SCALE_MAX, max(UI_SCALE_MIN, round(value, 2)))
+        if clamped != value:
+            log.warning("event=config_clamped key=ui_scale value=%s used=%s", value, clamped)
+        return clamped
+
+    @property
+    def ui_scale(self) -> float:
+        """整窗缩放系数(拖动时生效的那个,也是 ini 里 `ui_scale` 那个值)。"""
+        return self._ui_scale
+
+    def preview_ui_scale(self, scale: float) -> None:
+        """拖动过程中即时生效,**不落盘、不记日志**(与透明度滑杆同一套分工)。"""
+        scale = min(UI_SCALE_MAX, max(UI_SCALE_MIN, round(scale, 3)))
+        if scale == self._ui_scale:
+            return
+        self._ui_scale = scale
+        self.apply_scale(scale)
+
+    def set_ui_scale(self, scale: float) -> None:
+        """提交缩放:落盘 + 一条 `event=ui_scale`(滑杆松手 / 菜单关闭时调)。"""
+        self.preview_ui_scale(scale)
+        if self._ui_scale == self._saved_ui_scale:
+            return
+        self._saved_ui_scale = self._ui_scale
+        self._settings.setValue("ui_scale", self._ui_scale)
+        self._settings.sync()  # 立刻落盘:调完就断电也不该丢
+        log.info("event=ui_scale value=%.2f", self._ui_scale)
+
+    def apply_scale(self, scale: float) -> None:
+        """按系数重排整窗:窗口尺寸、每个盘条的位置与高度、绘制变换都乘它。"""
+        pad = round(PAD * scale)
+        gap = round(GAP * scale)
+        row_h = max(1, round(ROW_H * scale))
+        width = max(1, round(WINDOW_W * scale))
+        rows = len(self._bars)
+        self.setFixedSize(width, pad * 2 + row_h * rows + gap * (rows - 1))
+        for index, bar in enumerate(self._bars):
+            bar.setGeometry(pad, pad + index * (row_h + gap), width - pad * 2, row_h)
+            bar.set_scale(scale)
+        self.update()
+
     # ---- 拖动 ----
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
@@ -1033,9 +1119,8 @@ class TrayIcon(QSystemTrayIcon):
         # 菜单顺序:两个开关放**最上**,四行控件居中,**常用项靠下**贴近「退出」。
         # 位置完全由下面几段的调用先后决定 —— 想调顺序就是调它们的先后。
         #
-        # 这两个开关从前是"可勾选菜单项",Qt 会为整张菜单保留一条 ~20px 的勾选列(文字因此缩进到
-        # 27px、菜单也更宽)。改成**行内右侧复选框**之后勾选列消失,整张菜单窄了 21px(228 → 207)。
-        # 样式表版的药丸试过:看着不像能点的东西,所以两个都用原生复选框。
+        # 两个开关都是行内右侧复选框:菜单里一个"可勾选菜单项"都不留,Qt 才不会保留勾选列
+        # (勾选列要花掉约 20px,数字与做法见 开发经验第 39 条)
         self._click_through = QCheckBox(self._menu)
         self._click_through.setToolTip("开启后窗口不再接收鼠标,只能从本菜单关掉")
         self._click_through.toggled.connect(window.set_click_through)
@@ -1054,6 +1139,7 @@ class TrayIcon(QSystemTrayIcon):
         self._threshold_spins: dict[str, QSpinBox] = {}
         for label, name, tooltip, key in THRESHOLD_ROWS:
             self._add_threshold_row(window, key=key, label=label, name=name, tooltip=tooltip)
+        self._add_scale_row(window)  # 缩放与透明度都是"外观尺寸类",排在一起
         self._add_opacity_row(window)
         # 四个步进器统一宽度,按各自的 sizeHint 取最大(含最大位数与加减箭头,随字体/DPI 自适应)
         # —— 写死宽度会挤掉内容(实测 72px 时"85%"只显示出"85'");右对齐之后左边缘也跟着齐
@@ -1104,6 +1190,12 @@ class TrayIcon(QSystemTrayIcon):
         self._click_through.blockSignals(True)  # 否则会回环触发 set_click_through
         self._click_through.setChecked(blocked)
         self._click_through.blockSignals(False)
+
+        # 尺寸滑杆同理:对齐生效值,且不反过来触发预览
+        self._scale_slider.blockSignals(True)
+        self._scale_slider.setValue(scale_units(self._window.ui_scale))
+        self._scale_slider.blockSignals(False)
+        self._scale_value.setText(percent_text(self._window.ui_scale))
 
         self._autostart.blockSignals(True)  # 同上,避免回环
         self._autostart.setChecked(is_autostart_enabled())
@@ -1226,6 +1318,37 @@ class TrayIcon(QSystemTrayIcon):
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self._opacity_slider.sliderReleased.connect(self._commit_opacity)
         self._menu.aboutToHide.connect(self._commit_opacity)  # 拖到一半直接点别处也算提交
+
+    def _add_scale_row(self, window: StatusBarWindow) -> None:
+        """一行「调整尺寸」滑杆:一格 1%,量程 60% ~ 200%。
+
+        与透明度滑杆同一套:拖动期间只预览(窗口立刻变大小),松手 / 菜单关闭才提交落盘。
+        """
+        self._scale_slider = QSlider(Qt.Horizontal, self._menu)
+        self._scale_slider.setRange(scale_units(UI_SCALE_MIN), scale_units(UI_SCALE_MAX))
+        self._scale_slider.setValue(scale_units(window.ui_scale))
+        self._scale_slider.setMinimumWidth(SLIDER_WIDTH)
+        self._scale_slider.setToolTip("小组件整体大小(60% ~ 200%)")
+        self._scale_value = QLabel(percent_text(window.ui_scale), self._menu)
+        self._scale_value.setMinimumWidth(40)
+        self._scale_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._add_row(
+            "调整尺寸", self._scale_slider, "调整尺寸", "小组件整体大小", self._scale_value
+        )
+
+        self._scale_slider.valueChanged.connect(self._on_scale_changed)
+        self._scale_slider.sliderReleased.connect(self._commit_scale)
+        self._menu.aboutToHide.connect(self._commit_scale)  # 拖到一半直接点别处也算提交
+
+    def _on_scale_changed(self, units: int) -> None:
+        """拖动过程中:只预览,不落盘(拖一次会发几十个信号)。"""
+        scale = scale_from_units(units)
+        self._scale_value.setText(percent_text(scale))
+        self._window.preview_ui_scale(scale)
+
+    def _commit_scale(self) -> None:
+        """松手 / 菜单关闭:提交(落盘 + 一条 `event=ui_scale`);同一个值重复提交会被去重。"""
+        self._window.set_ui_scale(scale_from_units(self._scale_slider.value()))
 
     def _add_reset_row(self, window: StatusBarWindow) -> None:
         """一行「还原配置」:标签在左、按钮在右(与上面几行同一套左右对齐)。

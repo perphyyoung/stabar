@@ -18,6 +18,9 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
+
 # ======================================================================
 # 日志事件:两层共用的观察点
 # ======================================================================
@@ -239,6 +242,22 @@ def right_click(hwnd: int) -> None:
     _send(_mouse(RIGHTDOWN))
     time.sleep(0.05)
     _send(_mouse(RIGHTUP))
+
+
+def mouse_event(kind, local: QPoint, global_pos: QPoint) -> QMouseEvent:
+    """造一个左键鼠标事件(在**进程内**验证"按下 → 移动 → 松开"这类链路时用)。
+
+    给的是局部坐标与屏幕坐标两套:窗口移动/缩放那类逻辑同时要看这两者。
+    注意它只把事件交给目标控件,不走系统投递 —— 要验证"谁来收这个事件",得用真实输入。
+    """
+    return QMouseEvent(
+        kind,
+        QPointF(local),
+        QPointF(global_pos),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
 
 
 def tap_keys(*keys: int, gap: float = 0.12) -> None:

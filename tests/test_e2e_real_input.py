@@ -71,7 +71,7 @@ TARGET = os.environ.get("STABAR_E2E_TARGET", "exe")  # dev = 跑源码形态,不
 # 由第 2 层的 `test_menu_items_and_order` 钉着 —— 改托盘顺序就要改 ITEM_TRAY_HIDE。
 ITEM_WINDOW_HIDE = 1  # 小组件菜单:隐藏 / 立即刷新 / ─── / 退出
 ITEM_WINDOW_QUIT = 3
-ITEM_TRAY_HIDE = 8  # 鼠标穿透 / 开机自启 / 还原配置 / 刷新频率 / 橙红常亮三阈值 / 透明度 / 隐藏
+ITEM_TRAY_HIDE = 9  # 鼠标穿透 / 调整尺寸 / 开机自启 / 还原配置 / 刷新频率 / 三阈值 / 透明度 / 隐藏
 
 pytestmark = [
     pytest.mark.skipif(
