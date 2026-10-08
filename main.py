@@ -50,9 +50,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QPushButton,
     QSlider,
     QSpinBox,
     QStyle,
@@ -62,6 +64,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
+import dialogs
 import logging_setup
 
 # ======================================================================
@@ -231,8 +234,20 @@ def is_lit(max_ratio: float, lit: float, danger: float) -> bool:
 
 
 def percent_text(value: float) -> str:
-    """把不透明度写成给人看的百分比(滑杆右侧那个标签)。"""
+    """把 0.85 这样的值写成给人看的百分比(滑杆右侧标签、还原框里的阈值共用)。"""
     return f"{round(value * 100)}%"
+
+
+# 托盘菜单「还原配置」管的就是这几项:(ini 键, 显示名, 默认值, 把值写成给人看的文本)。
+# **位置 pos_x / pos_y 故意不在其中** —— 还原不该把窗口搬走,ini 里始终留着位置。
+# 默认值一律引用上面的常量、不再抄一份:改常量时还原跟着变。
+RESETTABLE_SETTINGS = (
+    ("refresh_seconds", "刷新频率", REFRESH_DEFAULT_S, lambda value: f"{value} 秒"),
+    ("warn_threshold", "橙色阈值", WARN_THRESHOLD, percent_text),
+    ("danger_threshold", "红色阈值", DANGER_THRESHOLD, percent_text),
+    ("lit_threshold", "常亮阈值", LIT_THRESHOLD, percent_text),
+    ("idle_opacity", "未报警透明度", FIRST_RUN_IDLE_OPACITY, percent_text),
+)
 
 
 def opacity_units(value: float) -> int:
@@ -755,6 +770,51 @@ class StatusBarWindow(QWidget):
             current["danger"],
         )
 
+    def current_setting(self, key: str) -> float:
+        """某个可还原项的当前生效值(对话框与执行都用它,免得两处各写一套取法)。"""
+        if key == "idle_opacity":
+            return self._idle_opacity
+        if key == "refresh_seconds":
+            return self._refresh_seconds
+        return self.thresholds[key.removesuffix("_threshold")]
+
+    def resettable_diff(self) -> list[tuple[str, str, str]]:
+        """「还原配置」会改掉的项:(名字, 当前值文本, 默认值文本),**只列有差异的**。
+
+        纯计算:不碰 ini、不弹窗,所以能直接断言(见 `tests/test_window.py`)。
+        """
+        rows = []
+        for key, name, default, fmt in RESETTABLE_SETTINGS:
+            current = self.current_setting(key)
+            if current != default:
+                rows.append((name, fmt(current), fmt(default)))
+        return rows
+
+    def reset_settings(self) -> list[str]:
+        """把可还原项恢复成默认:立刻生效 + 落盘,返回被改掉的名字(只含有差异的)。
+
+        位置 `pos_x` / `pos_y` **故意不在可还原项里** —— 还原不该把窗口搬走,ini 里始终留着位置。
+        走的是与托盘菜单同一条通道(`set_idle_opacity` / `set_refresh_seconds` / `set_thresholds`),
+        所以不另写一套生效逻辑;三条阈值合成一次提交,免得写出三条 `event=thresholds`。
+        """
+        targets = {
+            key: default
+            for key, _name, default, _fmt in RESETTABLE_SETTINGS
+            if self.current_setting(key) != default
+        }
+        if "idle_opacity" in targets:
+            self.set_idle_opacity(targets["idle_opacity"])
+        if "refresh_seconds" in targets:
+            self.set_refresh_seconds(targets["refresh_seconds"])
+        wanted = self.thresholds
+        for key in ("warn_threshold", "danger_threshold", "lit_threshold"):
+            if key in targets:
+                wanted[key.removesuffix("_threshold")] = targets[key]
+        if wanted != self.thresholds:
+            self.set_thresholds(warn=wanted["warn"], lit=wanted["lit"], danger=wanted["danger"])
+        log.info("event=config_reset keys=%s", ",".join(sorted(targets)))
+        return [name for key, name, _default, _fmt in RESETTABLE_SETTINGS if key in targets]
+
     def _restore_position(self) -> None:
         x = self._settings.value("pos_x")
         y = self._settings.value("pos_y")
@@ -975,10 +1035,13 @@ class TrayIcon(QSystemTrayIcon):
         self._autostart.setToolTip("写当前用户的注册表 Run 键,可回本菜单取消")
         self._autostart.toggled.connect(self._set_autostart)
 
-        # 四行控件(顺序固定):刷新频率、橙色阈值、红色阈值、常亮阈值、透明度
         # 控件行容器 / 行内控件 各自指向该行的 action(见 eventFilter、_release_row_focus)
         self._row_actions: dict[QWidget, QAction] = {}
         self._row_controls: dict[QWidget, QAction] = {}
+        # 「还原配置」不常用:紧跟着勾选项放,不占贴近「退出」的那段常用区
+        self._add_reset_row(window)
+
+        # 四行控件(顺序固定):刷新频率、橙色阈值、红色阈值、常亮阈值、透明度
         self._add_refresh_row(window)
         self._threshold_spins: dict[str, QSpinBox] = {}
         for label, name, tooltip, key in THRESHOLD_ROWS:
@@ -1154,6 +1217,31 @@ class TrayIcon(QSystemTrayIcon):
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self._opacity_slider.sliderReleased.connect(self._commit_opacity)
         self._menu.aboutToHide.connect(self._commit_opacity)  # 拖到一半直接点别处也算提交
+
+    def _add_reset_row(self, window: StatusBarWindow) -> None:
+        """一行「还原配置」:标签在左、按钮在右(与上面几行同一套左右对齐)。
+
+        托盘这层只管弹不弹、点了算不算;该还原哪些项、怎么生效都在窗口那边
+        (见 `StatusBarWindow.resettable_diff` / `reset_settings`)。
+        """
+        button = QPushButton("还原", self._menu)
+        button.setToolTip("把菜单里这些配置恢复成默认值(不含窗口位置)")
+        button.clicked.connect(self._confirm_reset)
+        self._add_row("还原配置", button, "还原配置", button.toolTip())
+
+    def _confirm_reset(self) -> None:
+        """点「还原」→ 列出有差异的项请人确认,确认了才真还原;没有差异就只说明一句。"""
+        rows = self._window.resettable_diff()  # 空清单也照常弹,只是换成说明
+        # 先收起菜单再弹模态框:popup 会请求键盘 / 鼠标抓取(离屏平台会打
+        # "This plugin does not support grabbing the keyboard"),收起来最稳
+        self._menu.close()
+        if dialogs.ResetDialog(rows, QColor(*COLOR_DANGER)).exec() != QDialog.DialogCode.Accepted:
+            log.debug("event=config_reset_cancelled")
+            return
+        if not rows:
+            log.debug("event=config_reset_skipped reason=all_default")  # 只是告知,没有可改的
+            return
+        self._window.reset_settings()  # 日志与落盘都在里面(event=config_reset)
 
     def _add_refresh_row(self, window: StatusBarWindow) -> None:
         """一行「刷新频率（秒）」步进器:1 ~ 60 秒、步进 1、可直接点进去敲数字。

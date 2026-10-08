@@ -1,10 +1,11 @@
 """TrayIcon:菜单内容与顺序、透明度滑杆、刷新步进器、勾选联动、显示切换、提示文字。"""
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QKeyEvent, QWheelEvent
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QWheelEvent
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
+import dialogs
 import main
 
 
@@ -141,10 +142,148 @@ def test_wheel_over_rows_does_not_change_values(window, tray) -> None:
         menu.close()
 
 
+def test_reset_diff_lists_only_changed_items(window) -> None:
+    """差异清单只列**有差异**的项,并给出"当前 → 默认"(还原框与执行都以它为准)。"""
+    assert window.resettable_diff() == []  # 全新配置本来就都是默认值
+
+    window.set_refresh_seconds(30)
+    window.set_thresholds(warn=0.80, lit=0.95, danger=0.92)
+
+    assert window.resettable_diff() == [
+        ("刷新频率", "30 秒", "15 秒"),
+        ("橙色阈值", "80%", "85%"),
+        ("红色阈值", "92%", "90%"),
+        ("常亮阈值", "95%", "90%"),
+    ]  # 未动的透明度不在其中
+
+
+def test_reset_keeps_position_and_restores_others(window, tmp_path) -> None:
+    """还原只动那 5 项:ini 里的**窗口位置必须原样留着**(定点要求)。"""
+    window.set_idle_opacity(0.55)
+    window.move(321, 123)
+    window._save_position()
+    window._settings.sync()  # 位置是攒着写的(靠进程退出冲刷),这里要真落盘才能查
+    assert "pos_x=321" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+
+    changed = window.reset_settings()
+
+    assert changed == ["未报警透明度"]
+    assert window.idle_opacity == pytest.approx(main.FIRST_RUN_IDLE_OPACITY)
+    text = (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+    assert "pos_x=321" in text and "pos_y=123" in text  # 位置没被碰
+    assert "idle_opacity=0.3" in text  # 这一项回到了默认
+
+
+def test_reset_row_asks_before_resetting(window, tray) -> None:
+    """点「还原」先弹确认框:只列有差异的项、默认按钮是取消、还原标红;确认后才真还原。"""
+    window.set_idle_opacity(0.50)
+    window.set_thresholds(warn=0.80, lit=0.90, danger=0.90)
+
+    menu = tray.contextMenu()
+    menu.popup(QPoint(400, 300))
+    listed: list[str] = []
+    try:
+
+        def confirm() -> None:
+            dialog = QApplication.activeModalWidget()  # exec() 的嵌套循环里才拿得到
+            assert isinstance(dialog, dialogs.ResetDialog)
+            listed.extend(label.text() for label in dialog.findChildren(QLabel))
+            assert dialog.cancel_button.isDefault()  # 回车不误触
+            assert dialog.reset_button.styleSheet()  # 红色提醒
+            assert dialog.cancel_button.width() == dialog.reset_button.width()  # 等宽才齐
+            dialog.reset_button.click()
+
+        QTimer.singleShot(120, confirm)
+        tray._confirm_reset()  # 与点按钮同一条路
+
+        assert "80% → 85%" in listed and "50% → 30%" in listed  # 有差异的都在
+        assert "15 秒" not in listed  # 没差异的不列
+        assert window.idle_opacity == pytest.approx(main.FIRST_RUN_IDLE_OPACITY)
+        assert window.thresholds["warn"] == pytest.approx(main.WARN_THRESHOLD)
+    finally:
+        menu.close()
+
+
+def test_reset_row_reports_when_nothing_to_reset(window, tray) -> None:
+    """没有可还原项时,点了要给一句说明(而不是毫无反应),且什么都不改。"""
+    assert window.resettable_diff() == []  # 前提:本来就都是默认值
+
+    menu = tray.contextMenu()
+    menu.popup(QPoint(400, 300))
+    seen: dict[str, object] = {}
+    try:
+
+        def read_and_close() -> None:
+            dialog = QApplication.activeModalWidget()
+            assert isinstance(dialog, dialogs.ResetDialog)
+            seen["文字"] = [label.text() for label in dialog.findChildren(QLabel)]
+            seen["有还原按钮"] = hasattr(dialog, "reset_button")
+            button = dialog.ok_button
+            left = button.mapTo(dialog, QPoint(0, 0)).x()
+            seen["好按钮左右留白"] = (left, dialog.width() - (left + button.width()))
+            button.click()  # 只有一颗「好」
+
+        QTimer.singleShot(120, read_and_close)
+        tray._confirm_reset()
+
+        assert any("已经是默认值" in str(text) for text in seen["文字"])
+        assert seen["有还原按钮"] is False
+        left, right = seen["好按钮左右留白"]
+        assert left == right  # 没有可还原项时也只留一颗「好」,且居中
+        assert window.idle_opacity == pytest.approx(main.FIRST_RUN_IDLE_OPACITY)  # 什么都没动
+    finally:
+        menu.close()
+
+
+def mouse_event(kind, local: QPoint, global_pos: QPoint) -> QMouseEvent:
+    """造一个左键鼠标事件(拖动用例用):局部坐标与屏幕坐标都给全。"""
+    return QMouseEvent(
+        kind,
+        QPointF(local),
+        QPointF(global_pos),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+
+
+def test_reset_dialog_draws_its_own_title_bar() -> None:
+    """自绘标题栏:无边框、标题左右居中、没有多余的 ✕,按住标题栏还能拖动。
+
+    原生标题栏整行都是 Windows 按主题画的,Qt 没有设置对齐的接口 —— 想让标题居中只能自己画
+    (开发经验第 38 条)。去掉原生框架的代价就是拖动也得自己接,所以这条一并钉住。
+    """
+    dialog = dialogs.ResetDialog([("橙色阈值", "80%", "85%")], QColor(*main.COLOR_DANGER))
+    dialog.show()
+    try:
+        assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint  # 原生标题栏已关掉
+
+        bar, label = dialog._title_bar, dialog.title_label
+        left = label.mapTo(bar, QPoint(0, 0)).x()
+        right = bar.width() - (left + label.width())
+        assert left == right  # 标题在标题栏里左右居中(数值断言,不靠眼睛)
+
+        assert [b.text() for b in dialog.findChildren(QPushButton)] == ["取消", "还原"]  # 没有 ✕
+
+        before = dialog.pos()
+        start = QPoint(bar.width() // 2, bar.height() // 2)
+        drag = QPoint(24, 18)
+        for kind, offset in (
+            (QEvent.Type.MouseButtonPress, QPoint(0, 0)),
+            (QEvent.Type.MouseMove, drag),
+            (QEvent.Type.MouseButtonRelease, drag),
+        ):
+            QApplication.sendEvent(bar, mouse_event(kind, start + offset, before + start + offset))
+        assert dialog.pos() == before + drag  # 拖多远就走多远(标题标签是点击穿透的,事件直达标题栏)
+    finally:
+        dialog.close()
+
+
 def test_menu_items_and_order(tray) -> None:
     assert [action.text() for action in tray._menu.actions()] == [
         "鼠标穿透",  # 勾选项放最上:不容易误触
         "开机自启",
+        "还原配置",  # 不常用:紧跟着勾选项,不占贴近"退出"的常用区(按钮那一行)
         "刷新频率",  # 步进器那一行(QWidgetAction;控件本身在屏幕上另有文字)
         "橙色阈值",  # 步进器,同上
         "红色阈值",  # 步进器,同上

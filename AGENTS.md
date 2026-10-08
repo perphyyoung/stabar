@@ -38,7 +38,7 @@ uv run pytest -q     # 4. 跑测试
 ## 模块划分
 
 - **`main.py` 只放应用装配与界面**(窗口、盘条、托盘、入口),基础设施不要往里塞。
-  已经拆出去的:日志 → `logging_setup.py`。
+  已经拆出去的:日志 → `logging_setup.py`;自绘的小对话框(无边框 + 自绘标题栏)→ `dialogs.py`。
 - 后续同类需求(配置读写、资源测量……)同样独立成模块,并在 `README.md` 的目录结构里登记。
 - 测试跟着模块走:测日志基础设施就在 `tests/test_logging.py` 里直接 `import logging_setup`,
   不要绕道 `main` 拿。
