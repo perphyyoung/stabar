@@ -23,6 +23,9 @@ def test_menu_items_and_order(tray) -> None:
         "隐藏",
         "立即刷新",
         "刷新频率",  # 步进器那一行(QWidgetAction;控件本身在屏幕上另有文字)
+        "橙色阈值",  # 步进器,同上
+        "红色阈值",  # 步进器,同上
+        "常亮阈值",  # 步进器,同上
         "透明度",  # 滑杆那一行,同上
         "鼠标穿透",
         "开机自启",
@@ -164,3 +167,57 @@ def test_every_item_shows_a_hover_tooltip(tray) -> None:
         )
     action = next(a for a in tray._menu.actions() if a.text() == "刷新频率")
     assert action.toolTip() == tray._refresh_spin.toolTip()
+
+
+def test_threshold_spins_default_and_coupled(tray, window) -> None:
+    """三条阈值:默认 85% / 90% / 90%,按百分比、步进 1%;橙色与红色的量程互相顶住。"""
+    spins = tray._threshold_spins
+    assert {key: spin.value() for key, spin in spins.items()} == {
+        "warn": 85,
+        "danger": 90,
+        "lit": 90,
+    }
+    assert all(spin.suffix() == "" for spin in spins.values())  # 单位写在行标签上
+    assert all(spin.singleStep() == 1 for spin in spins.values())
+    assert [label.text() for label in spins["warn"].parentWidget().findChildren(QLabel)] == [
+        "橙色阈值（%）"
+    ]
+
+    # 橙色最多到"红色 - 1%",红色至少从"橙色 + 1%"起;常亮阈值自由(1% ~ 100%)
+    assert spins["warn"].maximum() == 89
+    assert spins["danger"].minimum() == 86
+    assert (spins["lit"].minimum(), spins["lit"].maximum()) == (1, 100)
+
+    spins["danger"].setValue(95)  # 抬高红线,橙色上限跟着放宽
+    assert spins["warn"].maximum() == 94
+    spins["warn"].setValue(99)  # 想越过红线也不行,被上限顶住
+    assert spins["warn"].value() == 94
+    assert window.thresholds["warn"] == pytest.approx(0.94)
+
+    spins["lit"].setValue(50)  # 常亮阈值不受红色约束:压到橙线以下也允许
+    assert window.thresholds["lit"] == pytest.approx(0.50)
+
+
+def test_threshold_change_applies_then_persists(window, tray, tmp_path, events) -> None:
+    """改阈值:盘条立刻换线、常亮立刻重算,提交后写 ini 并只记一条日志。"""
+    tray._sync_state()
+    bar = window._bars[0]
+    assert bar._warn == pytest.approx(main.WARN_THRESHOLD)
+
+    tray._threshold_spins["warn"].setValue(70)
+    assert window.thresholds["warn"] == pytest.approx(0.70)
+    assert bar._warn == pytest.approx(0.70)  # 立刻生效:下一次绘制就用新线
+    assert saved_line(tmp_path, "warn_threshold") == "warn_threshold=0.85"  # 还没落盘
+
+    tray._threshold_spins["lit"].setValue(50)
+    assert window.thresholds["lit"] == pytest.approx(0.50)
+
+    tray._commit_thresholds()
+    assert saved_line(tmp_path, "warn_threshold") == "warn_threshold=0.7"
+    assert saved_line(tmp_path, "lit_threshold") == "lit_threshold=0.5"
+    assert saved_line(tmp_path, "danger_threshold") == "danger_threshold=0.9"
+
+    tray._commit_thresholds()  # 菜单关闭时还会来一次
+    assert [e for e in events() if "event=thresholds" in e] == [
+        "event=thresholds warn=0.70 lit=0.50 danger=0.90"
+    ]

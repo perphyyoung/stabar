@@ -81,10 +81,16 @@ OPACITY_STEPS = round(1.0 / OPACITY_STEP)  # 滑杆格数(1 格 = 5%,共 20 格)
 FADE_MS = 260  # 自动提亮的补间时长(毫秒);鼠标悬停是硬切,不走这里
 
 # --- 自动提亮:占用达到水位才变亮,低于水位严格按配置文件的不透明度显示 ---
-REVEAL_START = 0.8  # 提亮起点。低于它完全不提亮,你的盘常驻 80% 所以保持隐身
-WARN_THRESHOLD = 0.90  # 黄色警告线,同时也是完全提亮的点
-DANGER_THRESHOLD = 0.95  # 红色危险线
+WARN_THRESHOLD = 0.85  # 橙色警戒线的首次运行默认值(**只影响颜色**);托盘菜单可改
+DANGER_THRESHOLD = 0.90  # 红色危险线的首次运行默认值;托盘菜单可改
+LIT_THRESHOLD = 0.90  # 常亮阈值的首次运行默认值(到它或红色线界面常亮);托盘菜单可改
 COLOR_HYSTERESIS = 0.005  # 颜色切换滞回,避免卡在阈值上反复闪烁
+
+# --- 三条阈值的可调范围(托盘菜单按百分比显示,存盘是 1% 粒度的小数) ---
+THRESHOLD_MIN = 0.01
+THRESHOLD_MAX = 1.00
+THRESHOLD_STEP = 0.01  # 一格 = 1%
+THRESHOLD_GAP = 0.01  # 橙色与常亮都必须比红色至少低一格(橙色与常亮之间不设约束)
 
 # --- 尺寸与屏幕边距 ---
 WINDOW_W = 248
@@ -98,6 +104,12 @@ EDGE_MARGIN = 24
 # 实测(抓图 + actionGeometry):菜单项文字从菜单面板边缘 27px 处开始 = 面板 3 + 图标列 20 + 间距 4。
 MENU_ITEM_INDENT = 27
 SLIDER_WIDTH = 96  # 滑杆长度:够细调即可,太长会把整个菜单撑宽
+# 三行阈值步进器:(行标签, action 名, hover 提示, 内部键)。这个顺序就是菜单里的顺序。
+THRESHOLD_ROWS = (
+    ("橙色阈值（%）", "橙色阈值", "占用到这条线变橙(只影响颜色)", "warn"),
+    ("红色阈值（%）", "红色阈值", "占用到这条线变红;同时也会触发常亮", "danger"),
+    ("常亮阈值（%）", "常亮阈值", "占用到这条线界面常亮(红色线也会触发)", "lit"),
+)
 
 # --- 图标文件:托盘图标与 exe 文件图标共用这一份,见 icon_path() ---
 ICON_NAME = "stabar.ico"
@@ -204,19 +216,14 @@ def with_alpha(rgb: tuple[int, int, int], alpha: float) -> QColor:
     return color
 
 
-def reveal_level(max_ratio: float) -> float:
-    """占用率 -> 提亮程度 0~1。
+def is_lit(max_ratio: float, lit: float, danger: float) -> bool:
+    """占用率是否该常亮:到「常亮阈值」或「红色阈值」都算 —— 取两者中**更低**的那条。
 
-    低于 REVEAL_START 返回 0(严格按配置文件的不透明度显示),到 WARN_THRESHOLD 提亮到 1。
-    起点是独立常量,不再由 WARN_THRESHOLD 加减得出:那个隐式加减很坑,
-    改 WARN_THRESHOLD 会同时挪动提亮起点,看起来改了却几乎没效果。
+    红色线永远是"最迟必须亮"的兜底:就算把常亮阈值设得比它高(配置文件手写),到红线照样常亮。
+    两条线都没到就**完全不提亮**,严格按配置文件的不透明度显示(没有渐亮斜坡 —— 那会让
+    "平时隐身"变得不可预期)。
     """
-    if max_ratio <= REVEAL_START:
-        return 0.0
-    if max_ratio >= WARN_THRESHOLD:
-        return 1.0
-    span = WARN_THRESHOLD - REVEAL_START
-    return (max_ratio - REVEAL_START) / span if span > 0 else 1.0
+    return max_ratio >= min(lit, danger)
 
 
 def percent_text(value: float) -> str:
@@ -371,13 +378,22 @@ def make_tray_icon() -> QIcon:
 class DiskBar(QWidget):
     """单行:盘符 + 占用进度条 + 百分比。不透明度由窗口统一下发。"""
 
-    def __init__(self, path: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        path: str,
+        parent: QWidget | None = None,
+        warn: float = WARN_THRESHOLD,
+        danger: float = DANGER_THRESHOLD,
+    ) -> None:
         super().__init__(parent)
         self._path = path
         self._label = path[0] + ":"
         self._stats = read_disk(path)
         self._alpha = 255.0
         self._warned = False  # 警告色滞回标记
+        # 两条警戒线可配(托盘菜单改),所以存在实例上;默认值就是常量的首次运行值
+        self._warn = warn
+        self._danger = danger
         self._font = QFont(self.font())
         self._font.setPointSizeF(9.0)
         # 让父窗口统一接收鼠标事件,拖动和悬停都更简单
@@ -419,11 +435,17 @@ class DiskBar(QWidget):
         used, total = self._stats or (0, 0)
         return f"{used / total * 100:.1f}%" if total else "0.0%"
 
+    def set_thresholds(self, warn: float, danger: float) -> None:
+        """更新两条警戒线并重绘(阈值可配,所以不能再直接读模块常量)。"""
+        self._warn = warn
+        self._danger = danger
+        self.update()
+
     def _bar_color(self, ratio: float) -> QColor:
-        if ratio >= DANGER_THRESHOLD:
+        if ratio >= self._danger:
             self._warned = True
             return with_alpha(COLOR_DANGER, self._alpha)
-        floor = WARN_THRESHOLD - COLOR_HYSTERESIS if self._warned else WARN_THRESHOLD
+        floor = self._warn - COLOR_HYSTERESIS if self._warned else self._warn
         self._warned = ratio >= floor
         return with_alpha(COLOR_WARN if self._warned else COLOR_ACCENT, self._alpha)
 
@@ -520,17 +542,28 @@ class StatusBarWindow(QWidget):
         self._saved_refresh_seconds = self._refresh_seconds
         # 与 idle_opacity 一样回写:打开配置文件就能看到程序实际用的间隔
         self._settings.setValue("refresh_seconds", self._refresh_seconds)
+
+        self._warn_threshold = self._read_threshold("warn_threshold", WARN_THRESHOLD)
+        self._danger_threshold = self._read_threshold("danger_threshold", DANGER_THRESHOLD)
+        self._lit_threshold = self._read_threshold("lit_threshold", LIT_THRESHOLD)
+        self._enforce_threshold_order()
+        self._saved_thresholds = self.thresholds
+        for key, value in self.thresholds.items():
+            self._settings.setValue(f"{key}_threshold", value)
         self._settings.sync()
         log.debug(
-            "event=config file=%s idle_opacity=%s refresh_seconds=%d",
+            "event=config file=%s idle_opacity=%s refresh_seconds=%d warn=%.2f lit=%.2f danger=%.2f",
             settings_path(),
             self._idle_opacity,
             self._refresh_seconds,
+            self._warn_threshold,
+            self._lit_threshold,
+            self._danger_threshold,
         )
 
         self._bars: list[DiskBar] = []
         for i, path in enumerate(DRIVES):
-            bar = DiskBar(path, self)
+            bar = DiskBar(path, self, self._warn_threshold, self._danger_threshold)
             bar.setGeometry(PAD, PAD + i * (ROW_H + GAP), WINDOW_W - PAD * 2, ROW_H)
             # 详情文字挂在**窗口**上,而盘条铺满整块区域、自己又不处理 tooltip —— 不给它设这个,
             # 悬停在盘条上时那条 tooltip 就归盘条(它没有文字 → 不弹),表现为"详情时有时无"。
@@ -636,6 +669,88 @@ class StatusBarWindow(QWidget):
         self._settings.sync()
         log.info("event=refresh_interval seconds=%d", seconds)
 
+    def _read_threshold(self, key: str, fallback: float) -> float:
+        """读一条警戒线(0.01 ~ 1.00)。非法值退回默认,越界夹取并留痕。"""
+        try:
+            value = float(self._settings.value(key, fallback))
+        except (TypeError, ValueError):
+            log.warning("event=config_invalid key=%s fallback=%s", key, fallback)
+            return fallback
+        clamped = min(THRESHOLD_MAX, max(THRESHOLD_MIN, round(value, 2)))
+        if clamped != value:
+            log.warning("event=config_clamped key=%s value=%s used=%s", key, value, clamped)
+        return clamped
+
+    def _enforce_threshold_order(self) -> None:
+        """只保证橙色比红色低一格(不然橙色永远轮不到);**常亮阈值不受红色约束**。
+
+        常亮阈值可以高于红色:那样红色会先触发常亮(`is_lit` 取两者中更低的那条),
+        也就是"红线即常亮" —— 常亮默认值与红色相同,走的正是这条路。
+        """
+        if self._danger_threshold - THRESHOLD_MIN < THRESHOLD_GAP:
+            raised = THRESHOLD_MIN + THRESHOLD_GAP
+            log.warning(
+                "event=config_clamped key=danger_threshold value=%s used=%s",
+                self._danger_threshold,
+                raised,
+            )
+            self._danger_threshold = raised
+        ceiling = self._danger_threshold - THRESHOLD_GAP
+        if self._warn_threshold > ceiling:
+            log.warning(
+                "event=config_clamped key=warn_threshold value=%s used=%s",
+                self._warn_threshold,
+                ceiling,
+            )
+            self._warn_threshold = ceiling
+
+    @property
+    def thresholds(self) -> dict[str, float]:
+        """当前生效的三条阈值:`warn`(橙,只影响颜色)、`danger`(红)、`lit`(常亮)。"""
+        return {
+            "warn": self._warn_threshold,
+            "danger": self._danger_threshold,
+            "lit": self._lit_threshold,
+        }
+
+    def preview_thresholds(self, *, warn: float, lit: float, danger: float) -> None:
+        """改动过程中立刻生效(重绘颜色 + 重算常亮),**不落盘、不记日志**。
+
+        常亮阈值与红色阈值都会改变"界面是否常亮",所以改完必须重算 `_retarget`。
+        """
+        warn = min(THRESHOLD_MAX - THRESHOLD_GAP, max(THRESHOLD_MIN, round(warn, 2)))
+        lit = min(THRESHOLD_MAX, max(THRESHOLD_MIN, round(lit, 2)))
+        danger = min(THRESHOLD_MAX, max(warn + THRESHOLD_GAP, round(danger, 2)))
+        if (warn, lit, danger) == (
+            self._warn_threshold,
+            self._lit_threshold,
+            self._danger_threshold,
+        ):
+            return
+        self._warn_threshold = warn
+        self._lit_threshold = lit
+        self._danger_threshold = danger
+        for bar in self._bars:
+            bar.set_thresholds(warn, danger)
+        self._retarget(animate=False)
+
+    def set_thresholds(self, *, warn: float, lit: float, danger: float) -> None:
+        """提交三条阈值:落盘 + 一条 `event=thresholds`(菜单关闭 / 回车时调它)。"""
+        self.preview_thresholds(warn=warn, lit=lit, danger=danger)
+        current = self.thresholds
+        if current == self._saved_thresholds:
+            return  # 已经提交过同一组值,不重复写盘与记日志
+        self._saved_thresholds = current
+        for key, value in current.items():
+            self._settings.setValue(f"{key}_threshold", value)
+        self._settings.sync()
+        log.info(
+            "event=thresholds warn=%.2f lit=%.2f danger=%.2f",
+            current["warn"],
+            current["lit"],
+            current["danger"],
+        )
+
     def _restore_position(self) -> None:
         x = self._settings.value("pos_x")
         y = self._settings.value("pos_y")
@@ -688,7 +803,8 @@ class StatusBarWindow(QWidget):
         悬停走硬切(animate=False):鼠标一动就要立刻响应,不能有拖尾;
         阈值提亮保留补间,因为磁盘水位变化缓慢,直接跳变反而突兀。
         """
-        target = 1.0 if self._hovered else reveal_level(self._max_ratio())
+        lit_by_usage = is_lit(self._max_ratio(), self._lit_threshold, self._danger_threshold)
+        target = 1.0 if (self._hovered or lit_by_usage) else 0.0
         if target == self._target:
             return
         self._target = target
@@ -812,10 +928,20 @@ class TrayIcon(QSystemTrayIcon):
         self._visibility.setToolTip("显示 / 隐藏小组件(隐藏后只能从托盘恢复)")
         self._menu.addAction("立即刷新", window.refresh).setToolTip("立刻读一次磁盘占用")
 
-        # 两行控件(位置由这里的调用点决定):刷新频率紧跟"立即刷新"(同类功能放一起),
-        # 透明度排在它后面,再往后才是勾选项
+        # 四行控件(位置由这里的调用点决定):刷新频率紧跟"立即刷新",三个步进器挨在一起,
+        # 透明度排在两条警戒线之后,再往后才是勾选项
         self._add_refresh_row(window)
+        self._threshold_spins: dict[str, QSpinBox] = {}
+        for label, name, tooltip, key in THRESHOLD_ROWS:
+            self._add_threshold_row(window, key=key, label=label, name=name, tooltip=tooltip)
         self._add_opacity_row(window)
+        # 四个步进器统一宽度,按各自的 sizeHint 取最大(含最大位数与加减箭头,随字体/DPI 自适应)
+        # —— 写死宽度会挤掉内容(实测 72px 时"85%"只显示出"85'");右对齐之后左边缘也跟着齐
+        spins = (self._refresh_spin, *self._threshold_spins.values())
+        widest = max(spin.sizeHint().width() for spin in spins)
+        for spin in spins:
+            spin.setFixedWidth(widest)
+        self._sync_threshold_rows()
 
         self._click_through = self._menu.addAction("鼠标穿透")
         self._click_through.setCheckable(True)
@@ -855,6 +981,7 @@ class TrayIcon(QSystemTrayIcon):
         self._refresh_spin.blockSignals(True)
         self._refresh_spin.setValue(self._window.refresh_seconds)
         self._refresh_spin.blockSignals(False)
+        self._sync_threshold_rows()
 
         blocked = bool(self._window.windowFlags() & Qt.WindowTransparentForInput)
         self._click_through.blockSignals(True)  # 否则会回环触发 set_click_through
@@ -940,7 +1067,6 @@ class TrayIcon(QSystemTrayIcon):
         self._refresh_spin = QSpinBox(self._menu)
         self._refresh_spin.setRange(REFRESH_MIN_S, REFRESH_MAX_S)
         self._refresh_spin.setSingleStep(1)
-        self._refresh_spin.setFixedWidth(72)
         # 敲 "30" 时别在敲到 "3" 的那一刻就把间隔改成 3 秒
         self._refresh_spin.setKeyboardTracking(False)
         self._refresh_spin.setValue(window.refresh_seconds)
@@ -950,6 +1076,65 @@ class TrayIcon(QSystemTrayIcon):
         self._refresh_spin.valueChanged.connect(self._on_refresh_changed)
         self._refresh_spin.editingFinished.connect(self._commit_refresh)
         self._menu.aboutToHide.connect(self._commit_refresh)
+
+    def _add_threshold_row(
+        self, window: StatusBarWindow, *, key: str, label: str, name: str, tooltip: str
+    ) -> None:
+        """一行阈值步进器(按百分比显示、步进 1%)。
+
+        橙色与红色的量程互相顶住(橙色最高 `红色 - 1%`,红色最低 `橙色 + 1%`),配不出反序;
+        常亮阈值不受红色约束 —— 比红色高就等于"红线即常亮"。
+        """
+        spin = QSpinBox(self._menu)
+        spin.setRange(1, 100)
+        spin.setSingleStep(round(THRESHOLD_STEP * 100))
+        spin.setKeyboardTracking(False)  # 敲 "85" 时别在敲到 "8" 的那一刻就改
+        spin.setValue(round(window.thresholds[key] * 100))
+
+        self._threshold_spins[key] = spin
+        self._add_row(label, spin, name, tooltip)  # 提示文字由 _add_row 挂到三处
+
+        spin.valueChanged.connect(lambda _value: self._preview_thresholds())
+        spin.editingFinished.connect(self._commit_thresholds)
+        self._menu.aboutToHide.connect(self._commit_thresholds)
+
+    def _preview_thresholds(self) -> None:
+        """改动过程中:只预览(重绘颜色 + 重算常亮),不落盘。
+
+        顺手把三行的量程互相顶住 —— 只动边界、不动当前值,免得和用户正在敲的数字打架
+        (值被顶到边界时 Qt 会自己夹取并再发一次信号,重入一次就收敛)。
+        """
+        percent = {key: spin.value() for key, spin in self._threshold_spins.items()}
+        self._threshold_spins["warn"].setMaximum(percent["danger"] - 1)
+        self._threshold_spins["danger"].setMinimum(percent["warn"] + 1)
+        self._window.preview_thresholds(
+            warn=percent["warn"] / 100,
+            lit=percent["lit"] / 100,
+            danger=percent["danger"] / 100,
+        )
+
+    def _commit_thresholds(self) -> None:
+        """回车 / 菜单关闭:提交(落盘 + 一条 `event=thresholds`);同一组值会被去重。"""
+        percent = {key: spin.value() for key, spin in self._threshold_spins.items()}
+        self._window.set_thresholds(
+            warn=percent["warn"] / 100,
+            lit=percent["lit"] / 100,
+            danger=percent["danger"] / 100,
+        )
+
+    def _sync_threshold_rows(self) -> None:
+        """把三行对齐到生效值;橙色与红色的量程互相顶住,常亮阈值自由(1% ~ 100%)。"""
+        percent = {key: round(value * 100) for key, value in self._window.thresholds.items()}
+        for key, spin in self._threshold_spins.items():
+            spin.blockSignals(True)  # 对齐不该反过来触发预览
+            if key == "warn":
+                spin.setRange(1, percent["danger"] - 1)
+            elif key == "danger":
+                spin.setRange(percent["warn"] + 1, 100)
+            else:
+                spin.setRange(1, 100)
+            spin.setValue(percent[key])
+            spin.blockSignals(False)
 
     def _on_opacity_changed(self, step: int) -> None:
         """拖动过程中:只预览,不落盘(拖一次会发几十个信号)。"""

@@ -7,6 +7,7 @@
 import pytest
 from e2e_support import assert_in_order  # 只借日志解析那半部分(见该模块说明)
 from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
 import main
@@ -28,6 +29,51 @@ def test_hover_details_cover_the_whole_window(window) -> None:
     assert window.toolTip()  # 详情文字挂在窗口上
     assert window._bars
     assert all(bar.testAttribute(Qt.WA_TransparentForMouseEvents) for bar in window._bars)
+
+
+def test_brightness_only_from_hover_or_thresholds(window, monkeypatch) -> None:
+    """非悬停时亮度只有 0/1:橙色阈值只改颜色;到常亮阈值或红色阈值才常亮。"""
+    bar = window._bars[0]
+
+    monkeypatch.setattr(main, "read_disk", lambda path: (860, 1000))  # 86%:过橙线、未到常亮
+    window.refresh()
+    assert window._target == 0.0  # 橙线不提亮
+    assert bar._bar_color(0.86).name() == QColor(*main.COLOR_WARN).name()  # 但它变橙了
+
+    monkeypatch.setattr(main, "read_disk", lambda path: (910, 1000))  # 91%:过红线
+    window.refresh()
+    assert window._target == 1.0
+
+    # 常亮阈值压到 50%:60% 就常亮,而颜色还是蓝的(橙线仍在 85%)
+    window.set_thresholds(warn=0.85, lit=0.50, danger=0.90)
+    monkeypatch.setattr(main, "read_disk", lambda path: (600, 1000))
+    window.refresh()
+    assert window._target == 1.0
+    assert bar._bar_color(0.60).name() == QColor(*main.COLOR_ACCENT).name()
+
+
+def test_threshold_config_clamped_and_order_enforced(window, events) -> None:
+    """阈值读入:越界夹取、反序拉回调(橙色至少比红色低 1%),都留 WARNING。"""
+    window._settings.setValue("danger_threshold", 1.5)
+    assert window._read_threshold("danger_threshold", main.DANGER_THRESHOLD) == pytest.approx(
+        main.THRESHOLD_MAX
+    )
+    window._settings.setValue("warn_threshold", "abc")
+    assert window._read_threshold("warn_threshold", main.WARN_THRESHOLD) == pytest.approx(
+        main.WARN_THRESHOLD
+    )
+
+    window._warn_threshold, window._danger_threshold = 0.99, 0.50  # 反序
+    window._enforce_threshold_order()
+    assert window.thresholds == {
+        "warn": pytest.approx(0.49),
+        "danger": pytest.approx(0.50),
+        "lit": pytest.approx(main.LIT_THRESHOLD),  # 常亮阈值不受红色约束
+    }
+
+    assert any("event=config_clamped key=danger_threshold" in e for e in events())
+    assert any("event=config_clamped key=warn_threshold" in e for e in events())
+    assert any("event=config_invalid key=warn_threshold" in e for e in events())
 
 
 def test_refresh_seconds_config_is_clamped(window, events) -> None:

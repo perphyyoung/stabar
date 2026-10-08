@@ -65,6 +65,19 @@ def test_alpha_controls_painted_opacity(monkeypatch, qapp) -> None:
     assert painted_alpha(bar, *text_pixel) == 64
 
 
+def test_bar_color_follows_instance_thresholds(monkeypatch, qapp) -> None:
+    """警戒线可配:把橙线压到 50%、红线压到 60%,同一个占用率的颜色就跟着变。"""
+    bar = make_bar(monkeypatch, used=550, total=1000)
+    accent = QColor(*main.COLOR_ACCENT).name()
+    warn = QColor(*main.COLOR_WARN).name()
+    danger = QColor(*main.COLOR_DANGER).name()
+
+    assert bar._bar_color(0.55).name() == accent  # 默认 0.85/0.90 下还不到橙线
+    bar.set_thresholds(0.50, 0.60)
+    assert bar._bar_color(0.55).name() == warn  # 压下来后 55% 就是橙色
+    assert bar._bar_color(0.65).name() == danger
+
+
 def test_percent_label_has_one_decimal(monkeypatch, qapp) -> None:
     """主界面上的占用率带 1 位小数(80.2% 这种),不四舍五入成整数。"""
     assert make_bar(monkeypatch, used=250, total=1000).percent_label() == "25.0%"

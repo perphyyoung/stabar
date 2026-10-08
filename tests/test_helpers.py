@@ -39,21 +39,18 @@ def test_with_alpha_clamps_and_rounds(alpha: float, expected: int) -> None:
     assert main.with_alpha((10, 20, 30), alpha).alpha() == expected
 
 
-def test_reveal_level_below_start_never_brightens() -> None:
-    """低于提亮起点就完全不提亮 —— 这是"平时尽量透明"的保证。"""
-    assert main.reveal_level(main.REVEAL_START) == 0.0
-    assert main.reveal_level(0.0) == 0.0
+def test_is_lit_only_at_the_lit_or_danger_line() -> None:
+    """非悬停时亮度只有 0/1:到常亮阈值或红色阈值才常亮,橙色阈值不参与。"""
+    assert not main.is_lit(0.84, lit=0.90, danger=0.90)
+    assert not main.is_lit(0.86, lit=0.90, danger=0.90)  # 过了橙线但没到常亮线
+    assert main.is_lit(0.90, lit=0.90, danger=0.90)  # 默认:常亮阈值与红色相同
+    assert main.is_lit(0.95, lit=0.99, danger=0.90)  # 红线永远是兜底
 
 
-def test_reveal_level_at_or_above_warn_is_full() -> None:
-    assert main.reveal_level(main.WARN_THRESHOLD) == 1.0
-    assert main.reveal_level(1.0) == 1.0
-
-
-def test_reveal_level_is_linear_in_between() -> None:
-    """起点到警告线之间是线性过渡,不是一步跳到全亮。"""
-    midpoint = (main.REVEAL_START + main.WARN_THRESHOLD) / 2
-    assert main.reveal_level(midpoint) == pytest.approx(0.5)
+def test_is_lit_uses_the_lower_of_the_two_lines() -> None:
+    """常亮阈值低于红色时以它为准(于是可以"还蓝着但已经跳出来")。"""
+    assert main.is_lit(0.60, lit=0.50, danger=0.90)
+    assert not main.is_lit(0.49, lit=0.50, danger=0.90)
 
 
 def test_read_disk_returns_none_when_query_fails(monkeypatch) -> None:
