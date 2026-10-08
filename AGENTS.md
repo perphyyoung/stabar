@@ -41,7 +41,8 @@ uv run pytest -q     # 4. 跑测试
 ## 模块划分
 
 - **`main.py` 只放应用装配与界面**(窗口、盘条、托盘、入口),基础设施不要往里塞。
-  已经拆出去的:日志 → `logging_setup.py`;自绘的小对话框(无边框 + 自绘标题栏)→ `dialogs.py`。
+  已经拆出去的:日志 → `logging_setup.py`;自绘的小对话框(无边框 + 自绘标题栏)→ `dialogs.py`;
+  单实例闸门 → `single_instance.py`。
 - 后续同类需求(配置读写、资源测量……)同样独立成模块,并在 `README.md` 的目录结构里登记。
 - 测试跟着模块走:测日志基础设施就在 `tests/test_logging.py` 里直接 `import logging_setup`,
   不要绕道 `main` 拿。
@@ -54,7 +55,7 @@ uv run pytest -q     # 4. 跑测试
 | 层 | 文件 | 什么时候写在这里 |
 |---|---|---|
 | **1 纯函数** | `tests/test_helpers.py` | 待测行为**不依赖 Qt 运行环境**(不需要 `QApplication` / 事件循环;`QColor` 这类值类型可以用):纯计算、单位换算、边界夹取 |
-| **2 组件 / 单元** | `tests/test_<模块>.py`(`test_window` / `test_diskbar` / `test_tray` / `test_autostart` / `test_paths` / `test_logging`) | **构造好对象后直接调用 / 派发事件就能验证**的行为:状态机、颜色滞回、配置读写、注册表分支、路径解析、日志策略、绘制结果(用 `window.grab()` 取像素断言) |
+| **2 组件 / 单元** | `tests/test_<模块>.py`(`test_window` / `test_diskbar` / `test_tray` / `test_autostart` / `test_paths` / `test_logging` / `test_single_instance`) | **构造好对象后直接调用 / 派发事件就能验证**的行为:状态机、颜色滞回、配置读写、注册表分支、路径解析、日志策略、绘制结果(用 `window.grab()` 取像素断言) |
 | **3 A 层 E2E(进程内)** | `tests/test_e2e_ui.py` | **必须真的把事件 / 信号发出去**才能验证的跨对象链路,结论常落在**事件顺序**上:右键事件 → 菜单 → 选中项 → 状态;托盘信号 → 槽 → 显示切换 |
 | **4 B 层 E2E(进程外真输入)** | `tests/test_e2e_real_input.py` | 这个不变量**在 A 层原理上覆盖不到**:涉及 OS 输入层、分层窗口的逐像素命中测试、或**打包形态本身**。默认整份文件 skip,要 `STABAR_E2E=1` 才跑 |
 
@@ -98,7 +99,10 @@ uv run pytest -q     # 4. 跑测试
   - **外部 API 给的坐标先夹到屏幕内,而且别假设任务栏在哪**:`e2e_support.center_of_rect` 会与虚拟
     桌面求交(托盘图标矩形可能有一部分在屏幕外);托盘那两条用例还会先用 `taskbar_nudge_point`
     把鼠标推到任务栏那一侧的边缘、把自动隐藏的任务栏**唤出来**再取坐标 —— 那一侧由图标矩形
-    "往哪边超出屏幕"推出来,不假设位置(见 `开发经验.md` 第 43 条)。
+    "往哪边超出屏幕"推出来,不假设位置(见 `开发经验.md` 第 43 条);
+  - **要起第二个实例的用例必须换 `STABAR_CONFIG_DIR`**:单实例的管道名按配置目录派生
+    (`single_instance.instance_name`),所以"第二个实例"那类用例得**显式**把配置目录指到同一个
+    地方,其余用例各拿一份 tmp 天然互不干扰(见 `tests/test_e2e_real_input.py` 最后一条)。
 - **断言成对(第 3、4 层)**:结论涉及"真的隐藏 / 真的移动"时,断言 = 日志事件(程序自己的声明)
   **+ 一条外部事实**(`IsWindowVisible` / ini 里的 `pos_x`)。只用日志等于"验证代码和日志犯同一个错"
   (原理见 `日志使用说明.md` 第七节)。
