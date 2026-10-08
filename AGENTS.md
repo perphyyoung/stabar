@@ -85,10 +85,16 @@ uv run pytest -q     # 4. 跑测试
     offscreen 插件、启动即死(见 `开发经验.md` 第 24 条);
   - 动作一律用 `e2e_support` 的 `place()` / `guarded()`:检测到真人鼠标在动就**重试、再 skip**,
     **绝不记成失败** —— 假失败比没有测试更坏;
-  - **选菜单项一律按名称**:`e2e_support.click_menu_item("隐藏|显示")`(UI Automation)。**不要**
-    "按 N 次 ↓ 数第几项" —— 那个数是菜单里的**位置**,菜单一重排就失效,而且实测数错过一次。
-    dev 依赖 `uiautomation` 就是为它加的,它的 `Click()` 走真实鼠标;文字会变的项用正则匹配,
-    点完**程序会退出**的项(如「退出」)传 `closes_menu=False`(见 `开发经验.md` 第 42 条);
+  - **跨进程的"找控件 / 点控件 / 取坐标"优先用 UI Automation**(dev 依赖 `uiautomation`,封装在
+    `e2e_support` 里,`Click()` 走真实鼠标):别自己数位置、别自己按行高算像素 —— 那两类做法都因为
+    界面一改就失效而被淘汰过(见 `开发经验.md` 第 41、42 条)。用在两处:
+    - **菜单项按名称选**:`e2e_support.click_menu_item("隐藏|显示")`(名字就是 `QAction.text()`,
+      文字会变的用正则匹配;点完**程序会退出**的项传 `closes_menu=False`);
+    - 其他"外部能看见的控件"同理:按名称 / 类型 / 类名定位后 `Click()`、`RightClick()`,
+      或读 `BoundingRectangle` 拿屏幕坐标(比 Win32 自己算更贴近"用户看到的东西")。
+      **但它不是万能的**(实测):我们的窗口在 UIA 里是 `StatusBarWindow`(名 `stabar`),而
+      **托盘图标压根不在 UIA 树里**(全桌面搜 tooltip 里的字,0 命中)—— 托盘那两条只能继续用
+      `Shell_NotifyIconGetRect` + 唤出任务栏,别想着用 UIA 简化掉(见 `开发经验.md` 第 42 条);
   - **外部 API 给的坐标先夹到屏幕内,而且别假设任务栏在哪**:`e2e_support.center_of_rect` 会与虚拟
     桌面求交(托盘图标矩形可能有一部分在屏幕外);托盘那两条用例还会先用 `taskbar_nudge_point`
     把鼠标推到任务栏那一侧的边缘、把自动隐藏的任务栏**唤出来**再取坐标 —— 那一侧由图标矩形
