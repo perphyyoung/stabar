@@ -1,5 +1,9 @@
 """TrayIcon:菜单内容与顺序、透明度滑杆、刷新步进器、勾选联动、显示切换、提示文字。"""
 
+import importlib.metadata
+import tomllib
+from pathlib import Path
+
 import pytest
 from e2e_support import mouse_event
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
@@ -270,6 +274,9 @@ def test_reset_dialog_draws_its_own_title_bar() -> None:
 
 def test_menu_items_and_order(tray) -> None:
     assert [action.text() for action in tray._menu.actions()] == [
+        "版本号",  # 最上面一行:左「版本号」、右版本值
+        "配置和日志目录",  # 紧跟其后:右侧「打开」按钮
+        "",  # 分隔线:上面两行是"关于 / 自检",下面是操作
         "鼠标穿透",  # 勾选项放最上:不容易误触
         "开机自启",
         "还原配置",  # 不常用:紧跟着勾选项,不占贴近"退出"的常用区(按钮那一行)
@@ -284,6 +291,78 @@ def test_menu_items_and_order(tray) -> None:
         "",  # 分隔线
         "退出",
     ]
+
+
+def test_version_comes_from_installed_metadata(tray) -> None:
+    """菜单那行显示的版本号,取自**已安装分发的元数据**(唯一来源是 `pyproject.toml`)。
+
+    这正是 PyPA 对"单一来源"推荐的做法:版本只写在 pyproject.toml,由构建系统装进元数据,
+    运行时用 `importlib.metadata` 读。官方还**要求**配一条测试把这两处钉在一起。
+    """
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    installed = importlib.metadata.version(main.APP_NAME)
+
+    assert installed == declared  # 装出来的元数据与声明一致(uv sync 用的就是这份 pyproject)
+    assert main.app_version() == installed
+    assert tray._version_label.text() == installed
+    # 按名字取那一行,不按下标取:菜单顺序由 `test_menu_items_and_order` 负责,这里只关心内容
+    row = next(action for action in tray._menu.actions() if action.text() == "版本号")
+    assert not hasattr(main, "APP_VERSION")  # 代码里不许再抄一份
+    # 悬停只写用户能感知的事实:就是版本号本身 —— 不夹带路径,也不解释"版本从哪来"
+    assert row.toolTip() == f"当前运行的版本 {installed}"
+
+
+def test_data_dir_row_opens_the_config_dir(window, tray, monkeypatch) -> None:
+    """「配置和日志目录」那行:提示里就写着路径,点「打开」把它交给系统。
+
+    测试里把 `open_path` 换成替身 —— 真去开会在你屏幕上弹资源管理器。
+    """
+    opened: list[Path] = []
+    monkeypatch.setattr(main, "open_path", opened.append)
+
+    button = tray._open_dir_button
+    assert button.text() == "打开"
+    assert str(main.config_dir()) in button.toolTip()  # 不用点开就知道文件在哪
+    assert tray._row_actions[button.parentWidget()].text() == "配置和日志目录"  # 按钮在哪一行
+
+    menu = tray.contextMenu()
+    menu.popup(QPoint(400, 300))
+    try:
+        button.click()
+    finally:
+        menu.close()
+
+    assert opened == [main.config_dir()]  # 打包后这个目录同时放 ini 与日志
+    assert not menu.isVisible()  # 先收起菜单再开目录,资源管理器才会出现在前台
+
+
+def test_down_presses_walk_the_menu_in_order(tray) -> None:
+    """键盘落点:第 N 次 ↓ 停在第 N 个**可导航项**上(控件行参与导航、分隔线跳过)。
+
+    这里**不写死"第几项"**:期望顺序直接由菜单自己数出来(跳过分隔线),所以菜单重排、增删项都
+    不用改这条用例。真输入 E2E 选菜单项已改成按名称定位(`e2e_support.click_menu_item`),不再
+    依赖这个序号;这条只管键盘导航本身,顺带钉住"到底后再按一次绕回第一项"。
+    """
+    menu = tray.contextMenu()
+    navigable = [action for action in menu.actions() if not action.isSeparator()]
+    assert len(navigable) > 1  # 少了它,下面"绕回第一项"就无从谈起
+
+    def press_down() -> None:
+        QApplication.sendEvent(
+            menu,
+            QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier),
+        )
+
+    menu.popup(QPoint(400, 300))
+    try:
+        for expected in navigable:
+            press_down()
+            assert menu.activeAction() is expected  # ↓ 依次走过每一项(含控件行)
+        press_down()
+        assert menu.activeAction() is navigable[0]  # 到底了:再按一次绕回第一项
+    finally:
+        menu.close()
 
 
 def test_hide_text_follows_visibility(window, tray) -> None:

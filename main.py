@@ -35,6 +35,7 @@ from PySide6.QtCore import (
     QStandardPaths,
     Qt,
     QTimer,
+    QUrl,
     QVariantAnimation,
     Signal,
 )
@@ -42,6 +43,7 @@ from PySide6.QtGui import (
     QAction,
     QColor,
     QCursor,
+    QDesktopServices,
     QFont,
     QFontMetricsF,
     QIcon,
@@ -239,6 +241,18 @@ def settings_path() -> Path:
 def log_path() -> Path:
     """日志文件位置。"""
     return logging_setup.log_path(log_dir())
+
+
+def open_path(path: Path) -> None:
+    """用系统默认程序打开一个路径(这里只用来开目录)。
+
+    单独一层是为了**能替换**:测试里换成替身,免得真弹资源管理器(与 `winreg` 那套注入同一个思路)。
+    目录不存在就先建出来 —— 首次运行就点开时(还没写过任何文件)它可能真的还不存在。
+    """
+    directory = Path(path)
+    directory.mkdir(parents=True, exist_ok=True)
+    log.debug("event=open_dir path=%s", directory)
+    QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
 
 def lerp(a: float, b: float, t: float) -> float:
@@ -1134,8 +1148,11 @@ class TrayIcon(QSystemTrayIcon):
         self._row_actions: dict[QWidget, QAction] = {}
         self._row_controls: dict[QWidget, QAction] = {}
 
-        # 菜单顺序:两个开关放**最上**,四行控件居中,**常用项靠下**贴近「退出」。
+        # 菜单顺序:版本号放最上,两个开关其次,四行控件居中,**常用项靠下**贴近「退出」。
         # 位置完全由下面几段的调用先后决定 —— 想调顺序就是调它们的先后。
+        self._add_version_row()
+        self._add_data_dir_row()  # 紧挨版本号:排查时要的就是这一对(哪一版 / 文件在哪)
+        self._menu.addSeparator()  # 上面两行是"关于 / 自检",下面全是操作,隔一道
         #
         # 两个开关都是行内右侧复选框:菜单里一个"可勾选菜单项"都不留,Qt 才不会保留勾选列
         # (勾选列要花掉约 20px,数字与做法见 开发经验第 39 条)
@@ -1145,7 +1162,7 @@ class TrayIcon(QSystemTrayIcon):
         self._add_row("鼠标穿透", self._click_through, "鼠标穿透", self._click_through.toolTip())
 
         self._autostart = QCheckBox(self._menu)
-        self._autostart.setToolTip("写当前用户的注册表 Run 键,可回本菜单取消")
+        self._autostart.setToolTip("开机后自动启动,可回本菜单取消")
         self._autostart.toggled.connect(self._set_autostart)
         self._add_row("开机自启", self._autostart, "开机自启", self._autostart.toolTip())
 
@@ -1336,6 +1353,45 @@ class TrayIcon(QSystemTrayIcon):
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self._opacity_slider.sliderReleased.connect(self._commit_opacity)
         self._menu.aboutToHide.connect(self._commit_opacity)  # 拖到一半直接点别处也算提交
+
+    def _add_version_row(self) -> None:
+        """最上面一行:左边「版本号」、右边版本值(与其它行同一套左右结构)。
+
+        静态展示,点了不做任何事;提示只讲版本 —— 目录信息单独占一行(见 `_add_data_dir_row`),
+        版本行的悬停不再夹带路径。
+        """
+        version = app_version()
+        self._version_label = QLabel(version, self._menu)
+        self._version_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._add_row(
+            "版本号",
+            self._version_label,
+            "版本号",
+            f"当前运行的版本 {version}",  # 悬停只写用户能感知的事实;来源、路径之类不写进来
+        )
+
+    def _add_data_dir_row(self) -> None:
+        """一行「配置和日志目录」:右边「打开」按钮,点了交给系统打开那个目录。
+
+        目录取 `config_dir()` —— 打包后它和日志同目录(%LOCALAPPDATA%\\stabar),源码运行是项目目录。
+        完整路径直接写在提示里:不用点开就知道文件在哪。
+        """
+        self._open_dir_button = QPushButton("打开", self._menu)
+        self._open_dir_button.setToolTip(f"打开 {config_dir()}")
+        self._open_dir_button.clicked.connect(self._open_data_dir)
+        self._add_row(
+            "配置和日志目录",
+            self._open_dir_button,
+            "配置和日志目录",
+            self._open_dir_button.toolTip(),
+        )
+
+    def _open_data_dir(self) -> None:
+        """点「打开」:先收起菜单再让系统打开 —— 这样资源管理器才会出现在前台、不被菜单挡着。"""
+        self._menu.close()
+        open_path(config_dir())
 
     def _add_scale_row(self, window: StatusBarWindow) -> None:
         """一行「调整尺寸」滑杆:一格 1%,量程 60% ~ 200%。
