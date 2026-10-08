@@ -362,8 +362,94 @@ def _query_tray_rect(pid: int) -> tuple[int, int, int, int] | None:
     return None
 
 
-def center_of_rect(rect: tuple[int, int, int, int]) -> tuple[int, int]:
+SM_CXSCREEN, SM_CYSCREEN = 0, 1  # 主屏整屏尺寸
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+SPI_GETWORKAREA = 0x0030
+
+_user32.SystemParametersInfoW.argtypes = (
+    wintypes.UINT,
+    wintypes.UINT,
+    ctypes.c_void_p,
+    wintypes.UINT,
+)
+_user32.SystemParametersInfoW.restype = wintypes.BOOL
+
+
+def work_area() -> tuple[int, int, int, int]:
+    """主显示器的**工作区**(已排除任务栏)的 (left, top, right, bottom)。
+
+    测试进程自己跑在离屏平台上(`QT_QPA_PLATFORM=offscreen`),问 Qt 只会拿到假屏幕,所以直接
+    问系统:给 E2E 预置窗口位置时要用真实工作区(顺便也避开任务栏那一条)。
+    """
+    rect = wintypes.RECT()
+    _user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0)
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def primary_bounds() -> tuple[int, int, int, int]:
+    """主显示器整屏的 (left, top, right, bottom)—— 主屏原点就是 (0, 0)(任务栏在主屏上)。"""
+    return 0, 0, _user32.GetSystemMetrics(SM_CXSCREEN), _user32.GetSystemMetrics(SM_CYSCREEN)
+
+
+def taskbar_nudge_point(rect: tuple[int, int, int, int] | None = None) -> tuple[int, int]:
+    """把鼠标推到"任务栏所在那一侧"的屏幕边缘 —— 自动隐藏的任务栏会因此滑出来。
+
+    哪一侧**由图标矩形自己说了算**:任务栏自动隐藏时,shell 报的图标矩形会往那一侧超出屏幕
+    (实测:矩形底部到 1126 而屏幕只有 1080 → 任务栏在下方)。这样就不必假设任务栏在哪一侧、
+    是不是自动隐藏;矩形拿不到时退回去推下缘(Win11 的默认位置)。
+    """
+    left, top, right, bottom = primary_bounds()
+    if rect is not None:
+        if rect[3] > bottom:
+            return (left + right) // 2, bottom - 1
+        if rect[2] > right:
+            return right - 1, (top + bottom) // 2
+        if rect[0] < left:
+            return left, (top + bottom) // 2
+        if rect[1] < top:
+            return (left + right) // 2, top
+    return (left + right) // 2, bottom - 1
+
+
+def screen_bounds() -> tuple[int, int, int, int]:
+    """整个虚拟桌面(多显示器时是并集)的 (left, top, right, bottom)。"""
+    left = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+    top = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    right = left + _user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+    bottom = top + _user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    return left, top, right, bottom
+
+
+def clamp_to_screen(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """矩形与屏幕的交集(屏幕外的部分被切掉;完全在外面时返回空矩形)。"""
     left, top, right, bottom = rect
+    screen_left, screen_top, screen_right, screen_bottom = screen_bounds()
+    return (
+        max(left, screen_left),
+        max(top, screen_top),
+        min(right, screen_right),
+        min(bottom, screen_bottom),
+    )
+
+
+def visible_size(rect: tuple[int, int, int, int]) -> tuple[int, int]:
+    """矩形在屏幕内的高宽(0 表示有一边完全在屏幕外)。"""
+    left, top, right, bottom = clamp_to_screen(rect)
+    return max(0, right - left), max(0, bottom - top)
+
+
+def center_of_rect(rect: tuple[int, int, int, int]) -> tuple[int, int]:
+    """矩形与**屏幕**交集的中心 —— 不能直接取几何中心。
+
+    实测:托盘图标的矩形会有一部分落在屏幕外(矩形底部到 1126,而屏幕只有 1080 —— 任务栏
+    自动隐藏时,shell 报的是"隐藏位置"的矩形)。那时几何中心是个**不存在**的点:
+    `SetCursorPos` 被系统夹回屏幕边缘,读回来差 20+ 像素,于是被 `place()` 判成"真人鼠标在动",
+    整条用例白白跳过(而这台机器上根本没人碰鼠标)。完全在屏幕外的矩形退回几何中心,由上层跳过。
+    """
+    left, top, right, bottom = clamp_to_screen(rect)
+    if right <= left or bottom <= top:
+        left, top, right, bottom = rect
     return (left + right) // 2, (top + bottom) // 2
 
 

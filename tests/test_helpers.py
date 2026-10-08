@@ -5,6 +5,7 @@
 """
 
 import pytest
+from e2e_support import center_of_rect, screen_bounds, visible_size
 
 import main
 
@@ -28,6 +29,25 @@ def test_human_size(value: float, expected: str) -> None:
 def test_lerp_interpolates() -> None:
     assert main.lerp(0, 10, 0.25) == 2.5
     assert main.lerp(2, 2, 0.9) == 2
+
+
+def test_center_of_rect_stays_on_screen() -> None:
+    """矩形有一部分在屏幕外时,取点必须落在**屏幕内** —— 几何中心可能是个不存在的点。
+
+    实测:任务栏自动隐藏时,shell 报的托盘图标矩形底部到 1126,而屏幕只有 1080;几何中心因此
+    落到屏幕外,`SetCursorPos` 被系统夹回边缘、读回来差 20+ 像素,被误判成"真人鼠标在动"。
+    """
+    left, top, _, bottom = screen_bounds()
+    off_bottom = (left + 100, bottom - 2, left + 132, bottom + 46)  # 实测形态:底部超出屏幕 46 像素
+
+    x, y = center_of_rect(off_bottom)
+    assert top <= y < bottom  # 落在屏幕内
+    assert off_bottom[0] <= x < off_bottom[2]
+    assert visible_size(off_bottom) == (32, 2)  # 可见的只剩贴着屏幕边缘的两像素
+
+    # 完全在屏幕外:退回几何中心,由上层(托盘那两条用例)据此跳过
+    outside = (left + 100, bottom + 10, left + 132, bottom + 40)
+    assert center_of_rect(outside) == (left + 116, bottom + 25)
 
 
 @pytest.mark.parametrize(
