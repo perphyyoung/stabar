@@ -64,6 +64,7 @@ from e2e_support import (
     visible_size,
     wait_for_event,
     windows_of,
+    work_area,
 )
 
 import logging_setup
@@ -135,7 +136,17 @@ def _stop(proc) -> None:
 
 @pytest.fixture
 def app(tmp_path):
-    """启动被测进程:配置隔离到 tmp,日志按"只有两份"的落点读。"""
+    """启动被测进程:配置隔离到 tmp,日志按"只有两份"的落点读。
+
+    配置里**预置窗口位置**(工作区左上角):否则会走产品"首次运行摆右上角"的默认 —— 那是给
+    用户看的,而且右上角紧挨托盘/任务栏、拖拽用例的 +36/+24 还会顶到屏幕右缘。位置由测试指定,
+    启动后立刻断言窗口真落在那里(对不上说明 ini 没被用上)。
+    """
+    area_left, area_top, _, _ = work_area()
+    seed_x, seed_y = area_left + main.EDGE_MARGIN, area_top + main.EDGE_MARGIN
+    (tmp_path / main.SETTINGS_NAME).write_text(
+        f"[General]\npos_x={seed_x}\npos_y={seed_y}\n", encoding="utf-8"
+    )
     env = {**os.environ, "STABAR_CONFIG_DIR": str(tmp_path), "STABAR_LOG_LEVEL": "DEBUG"}
     # conftest 给**本进程**设了 QT_QPA_PLATFORM=offscreen(离屏跑单测),但绝不能再透给子进程:
     # 打包按体积裁剪时把 qoffscreen.dll 这类插件剔掉了,子进程会直接启动失败并弹出
@@ -152,6 +163,10 @@ def app(tmp_path):
         pid = _pid_from_log(log, since) or proc.pid  # dev 形态下两者不同,见 _pid_from_log
         hwnd = find_window(pid)
         assert hwnd, f"没找到窗口句柄(pid={pid})"
+        left, top, _, _ = rect_of(hwnd)
+        assert (left, top) == (seed_x, seed_y), (
+            f"窗口没落在 ini 指定的位置:期望 {(seed_x, seed_y)} 实际 {(left, top)}"
+        )
         yield SimpleNamespace(
             proc=proc,
             pid=pid,
