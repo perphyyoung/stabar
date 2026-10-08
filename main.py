@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 import os
 import shutil
@@ -73,6 +74,8 @@ import logging_setup
 # ======================================================================
 
 APP_NAME = "stabar"  # 决定打包后配置目录的名字
+# 版本号**不在这里**:唯一来源是 pyproject.toml 的 [project] version,运行时由 app_version() 读它。
+# 不要为了省一次读文件而在代码里另抄一份 —— 抄了就会有一天忘了同步。
 DRIVES = ("C:/", "D:/")  # 要监控的盘符
 REFRESH_MS = 15_000  # 刷新间隔的默认值(毫秒);托盘菜单可改(见 refresh_seconds)
 REFRESH_MIN_S = 1  # 托盘步进器允许的最小秒数
@@ -211,6 +214,21 @@ def log_dir() -> Path:
     if getattr(sys, "frozen", False):
         return _app_config_dir()
     return Path(__file__).parent
+
+
+def app_version() -> str:
+    """版本号:**唯一来源是 `pyproject.toml` 的 `[project] version`**,这里只负责把它读出来。
+
+    走标准库的 `importlib.metadata` —— 它读的是"已安装分发"的元数据:源码形态靠 `uv sync` 把本工程
+    装成可编辑包,打包形态靠 `stabar.spec` 里的 `copy_metadata`(PyInstaller 官方做法)把那小份
+    `dist-info` 带进 `_internal/`。**不必把 `pyproject.toml` 塞进包里**,代码里也不另抄一份。
+    没有元数据(比如直接 `python main.py`、没同步过环境)就返回 `unknown` 并留一条日志。
+    """
+    try:
+        return importlib.metadata.version(APP_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        log.warning("event=version_unavailable hint=环境里没有本工程的分发,先 uv sync")
+        return "unknown"
 
 
 def settings_path() -> Path:
@@ -1504,7 +1522,8 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     level = logging_setup.setup_logging(log_dir(), APP_NAME)
     log.info(
-        "event=start frozen=%s level=%s config=%s log=%s drives=%s",
+        "event=start version=%s frozen=%s level=%s config=%s log=%s drives=%s",
+        app_version(),  # 顺便把版本记在启动行:排查时"这是哪一版"最常被问
         bool(getattr(sys, "frozen", False)),
         logging.getLevelName(level),
         settings_path(),

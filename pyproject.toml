@@ -1,16 +1,27 @@
+[build-system]
+# 让本工程成为"可安装的分发"—— 这是 importlib.metadata.version("stabar") 能读到版本号的前提。
+# 版本号的唯一来源仍是下面的 [project] version,由构建系统分发到运行时位置(官方推荐做法)。
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "stabar"
-version = "0.1.0"
+version = "0.1.1"
 requires-python = ">=3.13"
 dependencies = [
     "pyside6>=6.11.2",
 ]
+
+[tool.setuptools]
+# 本工程没有包目录,是根目录下平铺的几个模块,显式列给 setuptools
+py-modules = ["main", "dialogs", "logging_setup"]
 
 [dependency-groups]
 dev = [
     "pyinstaller>=6.22.3",
     "pytest>=9.1.1",
     "pytest-qt>=4.5.0",
+    "uiautomation>=2.0.29",
 ]
 
 [tool.ruff]

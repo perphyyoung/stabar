@@ -11,6 +11,8 @@
 
 import os
 
+from PyInstaller.utils.hooks import copy_metadata
+
 # --- 用不到的 PySide6 模块:在导入分析阶段就排除 ---
 PYSIDE_EXCLUDES = [
     "PySide6.QtQml",
@@ -125,8 +127,14 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    # 托盘图标运行时读这个文件,所以要一起打进包里(_internal/stabar.ico)
-    datas=[(os.path.join(SPECPATH, "stabar.ico"), ".")],
+    # 打包要带的两样东西:
+    #   stabar.ico    —— 托盘图标:漏了 QIcon 会静默返回空图标,托盘直接不出现
+    #   分发元数据     —— 版本号从它读(见 main.app_version());这是 PyInstaller 官方给的做法,
+    #                    只带几百字节的 dist-info,不必把整个 pyproject.toml 塞进包里
+    datas=[
+        (os.path.join(SPECPATH, "stabar.ico"), "."),
+        *copy_metadata("stabar"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

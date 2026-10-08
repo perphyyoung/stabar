@@ -107,6 +107,9 @@ uv run pytest -q     # 4. 跑测试
   【实测】/【文档】/【项目内】),不要只留在对话里。
 - **但"必须一直记得"的写进本文件**:`开发经验.md` 只在需要时才翻开,而本文件始终在上下文里。
   这类写一两句就够,不展开。
+- 版本号**只有一处**:`pyproject.toml` 的 `[project] version`。运行时用 `importlib.metadata.version()`
+  读(源码形态靠 `uv sync` 装成可编辑包;打包靠 `stabar.spec` 里的 `copy_metadata` 带上那点元数据)。
+  不要在代码里再写一份,也不要把 `pyproject.toml` 塞进包里。
 - 打包冒烟看不到日志是正常的:打包后默认只记 WARNING(`LOG_LEVEL_FROZEN`),`event=start`、
   `window state=shown` 都是 INFO —— 给子进程带 `STABAR_LOG_LEVEL=INFO` 再看。**别拿"日志没动"当
   "进程没起来"的证据**:先看 ini 的 mtime,再枚举窗口。
