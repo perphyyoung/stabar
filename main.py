@@ -50,6 +50,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -107,9 +108,11 @@ GAP = 6
 EDGE_MARGIN = 24
 
 # --- 托盘菜单 ---
-# 控件行(滑杆)没有菜单项那段缩进,要自己补上左边距才能与其它行文字左对齐。
-# 实测(抓图 + actionGeometry):菜单项文字从菜单面板边缘 27px 处开始 = 面板 3 + 图标列 20 + 间距 4。
-MENU_ITEM_INDENT = 27
+# 控件行(滑杆 / 开关 / 按钮)没有菜单项那段缩进,要自己补上左边距才能与其它行文字左对齐。
+# 实测(抓图 + 像素扫描):菜单里**没有可勾选项**之后,纯文字项从面板边缘 10~11px 处开始;
+# 控件行自己补 8 的左边距正好落在同一列(量出来 11)。左右取同一个值,两侧留白也就相等了。
+# 从前有原生勾选项时是 27(面板 3 + 勾选列 20 + 间距 4)。
+MENU_ITEM_INDENT = 8
 SLIDER_WIDTH = 96  # 滑杆长度:够细调即可,太长会把整个菜单撑宽
 # 三行阈值步进器:(行标签, action 名, hover 提示, 内部键)。这个顺序就是菜单里的顺序。
 THRESHOLD_ROWS = (
@@ -1023,22 +1026,27 @@ class TrayIcon(QSystemTrayIcon):
         # 文字来自每个 QAction 自己的 setToolTip —— 没设的项,开了也没有提示可显示
         self._menu.setToolTipsVisible(True)
 
-        # 菜单顺序:容易被误触的勾选项放**最上**,四行控件居中,**常用项靠下**贴近「退出」。
-        # 位置完全由下面几段的调用先后决定 —— 想调顺序就是调它们的先后。
-        self._click_through = self._menu.addAction("鼠标穿透")
-        self._click_through.setCheckable(True)
-        self._click_through.setToolTip("开启后窗口不再接收鼠标,只能从本菜单关掉")
-        self._click_through.toggled.connect(window.set_click_through)
-
-        self._autostart = self._menu.addAction("开机自启")
-        self._autostart.setCheckable(True)
-        self._autostart.setToolTip("写当前用户的注册表 Run 键,可回本菜单取消")
-        self._autostart.toggled.connect(self._set_autostart)
-
         # 控件行容器 / 行内控件 各自指向该行的 action(见 eventFilter、_release_row_focus)
         self._row_actions: dict[QWidget, QAction] = {}
         self._row_controls: dict[QWidget, QAction] = {}
-        # 「还原配置」不常用:紧跟着勾选项放,不占贴近「退出」的那段常用区
+
+        # 菜单顺序:两个开关放**最上**,四行控件居中,**常用项靠下**贴近「退出」。
+        # 位置完全由下面几段的调用先后决定 —— 想调顺序就是调它们的先后。
+        #
+        # 这两个开关从前是"可勾选菜单项",Qt 会为整张菜单保留一条 ~20px 的勾选列(文字因此缩进到
+        # 27px、菜单也更宽)。改成**行内右侧复选框**之后勾选列消失,整张菜单窄了 21px(228 → 207)。
+        # 样式表版的药丸试过:看着不像能点的东西,所以两个都用原生复选框。
+        self._click_through = QCheckBox(self._menu)
+        self._click_through.setToolTip("开启后窗口不再接收鼠标,只能从本菜单关掉")
+        self._click_through.toggled.connect(window.set_click_through)
+        self._add_row("鼠标穿透", self._click_through, "鼠标穿透", self._click_through.toolTip())
+
+        self._autostart = QCheckBox(self._menu)
+        self._autostart.setToolTip("写当前用户的注册表 Run 键,可回本菜单取消")
+        self._autostart.toggled.connect(self._set_autostart)
+        self._add_row("开机自启", self._autostart, "开机自启", self._autostart.toolTip())
+
+        # 「还原配置」不常用:紧跟着两个开关放,不占贴近「退出」的那段常用区
         self._add_reset_row(window)
 
         # 四行控件(顺序固定):刷新频率、橙色阈值、红色阈值、常亮阈值、透明度
@@ -1121,7 +1129,8 @@ class TrayIcon(QSystemTrayIcon):
         """
         holder = MenuRow(self._menu)  # 自己画当前项底色,见 MenuRow
         layout = QHBoxLayout(holder)
-        layout.setContentsMargins(MENU_ITEM_INDENT, 4, 10, 4)
+        # 左右取同一个值:左侧要跟上菜单项文字(见 MENU_ITEM_INDENT),右侧跟它相等才不显得偏
+        layout.setContentsMargins(MENU_ITEM_INDENT, 4, MENU_ITEM_INDENT, 4)
         layout.setSpacing(8)
 
         title = QLabel(label, holder)

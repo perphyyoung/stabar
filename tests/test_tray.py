@@ -3,7 +3,7 @@
 import pytest
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QWheelEvent
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton
 
 import dialogs
 import main
@@ -336,6 +336,22 @@ def test_click_through_checkbox_reflects_window(window, tray) -> None:
     window.set_click_through(True)
     tray._sync_state()
     assert tray._click_through.isChecked()
+
+
+def test_switches_are_checkbox_rows_not_checkable_items(tray) -> None:
+    """两个开关是"行内右侧复选框",不是可勾选菜单项。
+
+    可勾选菜单项会让 Qt 给**整张**菜单保留一条 ~20px 的勾选列:实测菜单文字起点 10~11 → 27px、
+    菜单宽度 207 → 228px。所以这条钉住"菜单里一个可勾选项都没有",免得哪天被改回去。
+    """
+    assert isinstance(tray._click_through, QCheckBox)
+    assert isinstance(tray._autostart, QCheckBox)
+    assert [action.text() for action in tray._menu.actions() if action.isCheckable()] == []
+
+    for box, name in ((tray._click_through, "鼠标穿透"), (tray._autostart, "开机自启")):
+        assert tray._row_controls[box].text() == name  # 是控件行,不是菜单项
+        margins = box.parentWidget().layout().contentsMargins()
+        assert margins.left() == margins.right() == main.MENU_ITEM_INDENT  # 左右留白相等
 
 
 def test_opacity_slider_matches_window_value(window, tray) -> None:
