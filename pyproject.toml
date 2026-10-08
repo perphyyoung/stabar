@@ -35,6 +35,7 @@ extend-ignore-names = [
     "mouseMoveEvent",
     "mouseReleaseEvent",
     "contextMenuEvent",
+    "eventFilter",
     "CreateKeyEx",
     "OpenKey",
     "QueryValueEx",

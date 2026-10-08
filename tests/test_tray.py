@@ -1,8 +1,9 @@
 """TrayIcon:菜单内容与顺序、透明度滑杆、刷新步进器、勾选联动、显示切换、提示文字。"""
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QApplication, QLabel
 
 import main
 
@@ -16,6 +17,67 @@ def saved_line(tmp_path, key: str) -> str:
     """配置文件里以 `key` 开头的那一行(真读文件,不读 QSettings 的缓存)。"""
     text = (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
     return next(line for line in text.splitlines() if line.startswith(key))
+
+
+def row_band(menu, action) -> tuple[int, int]:
+    """菜单项的 y 带(避开边框一两像素)。"""
+    rect = menu.actionGeometry(action)
+    return rect.top() + 2, rect.bottom() - 2
+
+
+def strip_mean(image, top: int, bottom: int, x0: int = 8, x1: int = 25) -> tuple[int, ...]:
+    """行左侧空白带的平均底色(不含文字与控件)—— 用来看"有没有被画上当前项高亮"。"""
+    total = [0, 0, 0]
+    count = 0
+    for x in range(x0, x1):
+        for y in range(top, bottom):
+            color = QColor(image.pixel(x, y))
+            total[0] += color.red()
+            total[1] += color.green()
+            total[2] += color.blue()
+            count += 1
+    return tuple(round(value / count) for value in total)
+
+
+def test_widget_row_follows_the_menu_highlight(window, tray) -> None:
+    """控件行也要跟菜单的"当前项":进入时高亮 + 当前项指过去,离开时都清掉。
+
+    背景(实测):`QMenu` **不**为 `QWidgetAction` 行画高亮(纯文字项会),而控件行收不到菜单的
+    move —— 当前项于是停在上一个纯文字项上,点行的空白处就会误触那一项(用户就是这么误开
+    "鼠标穿透"的)。修法见 `main.MenuRow` 与 `TrayIcon.eventFilter`。
+
+    底色是用菜单项那套 style 控件画的,所以外观与纯文字项一致(实测真平台两者都是 `(43,43,43)`);
+    离屏平台 Qt 自己不画菜单项高亮,没法在这里对比颜色,因此本用例只断言"进入时变、离开时回"。
+    """
+    menu = tray.contextMenu()
+    holder = tray._opacity_slider.parentWidget()
+    assert holder.testAttribute(Qt.WA_NoMousePropagation)  # 点空白处不冒泡到菜单
+
+    menu.popup(QPoint(400, 300))
+    try:
+
+        def background(action=None) -> tuple[int, ...]:
+            # `update()` 是异步的:不先把事件跑完就抓图,会抓到改动之前的画面
+            QApplication.processEvents()
+            target = action or tray._row_actions[holder]
+            return strip_mean(menu.grab().toImage(), *row_band(menu, target))
+
+        plain = background()
+        QApplication.sendEvent(holder, QEvent(QEvent.Type.Enter))
+        assert menu.activeAction() is tray._row_actions[holder]  # 当前项被指到本行
+        hovered = background()
+        assert hovered != plain  # 真的画上了底色
+
+        QApplication.sendEvent(holder, QEvent(QEvent.Type.Leave))
+        assert menu.activeAction() is None  # 陈旧高亮不会留下
+        assert background() == plain  # 底色也清干净
+
+        # 颜色与纯文字项一致这件事由**构造**保证(同一套 style 控件画底色),这里不跨环境比对;
+        # 真平台的实测值(两边都是 43)记在 docstring 与 `开发经验.md` 第 34 条。
+        QApplication.sendEvent(holder, QEvent(QEvent.Type.Enter))
+        assert background() == hovered  # 再次进入:底色可复现
+    finally:
+        menu.close()
 
 
 def test_menu_items_and_order(tray) -> None:

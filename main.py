@@ -27,6 +27,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QEvent,
     QPoint,
     QRectF,
     QSettings,
@@ -37,6 +38,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QCursor,
     QFont,
@@ -53,6 +55,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QSlider,
     QSpinBox,
+    QStyle,
+    QStyleOptionMenuItem,
     QSystemTrayIcon,
     QWidget,
     QWidgetAction,
@@ -911,6 +915,41 @@ class StatusBarWindow(QWidget):
             self._retarget(animate=False)
 
 
+class MenuRow(QWidget):
+    """托盘菜单里"控件行"的容器:自己画当前项底色。
+
+    **实测**:菜单把当前项指到 `QWidgetAction` 那一行时,`QMenu` **不会**给它画高亮
+    (纯文字项会:同一行左侧空白带的底色 30 → 43,而控件行纹丝不动)。所以想让控件行也高亮,
+    只能自己画 —— 这里借用菜单项那套 style 控件来画,只画底色不画文字,于是换主题 / 换 DPI 时
+    外观与纯文字项天然一致(而不是写死一个颜色)。
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._hovered = False
+
+    def set_hovered(self, hovered: bool) -> None:
+        """指针是否停在本行 —— 由 `TrayIcon` 的事件过滤器驱动:菜单自己收不到控件行的 move。"""
+        if hovered == self._hovered:
+            return
+        self._hovered = hovered
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if not self._hovered:
+            return
+        option = QStyleOptionMenuItem()
+        option.initFrom(self)
+        option.rect = self.rect()
+        option.menuItemType = QStyleOptionMenuItem.MenuItemType.Normal
+        option.checkType = QStyleOptionMenuItem.CheckType.NotCheckable
+        option.menuHasCheckableItems = False
+        option.maxIconWidth = 0
+        option.text = ""  # 文字由行里的 QLabel 负责,这里只要那块底色
+        option.state |= QStyle.StateFlag.State_Selected
+        self.style().drawControl(QStyle.ControlElement.CE_MenuItem, option, QPainter(self), self)
+
+
 class TrayIcon(QSystemTrayIcon):
     """托盘图标:小组件可以调到几乎看不见,这里是唯一稳定的入口。"""
 
@@ -930,6 +969,9 @@ class TrayIcon(QSystemTrayIcon):
 
         # 四行控件(位置由这里的调用点决定):刷新频率紧跟"立即刷新",三个步进器挨在一起,
         # 透明度排在两条警戒线之后,再往后才是勾选项
+        self._row_actions: dict[
+            QWidget, QAction
+        ] = {}  # 控件行容器 -> 该行的 action(见 eventFilter)
         self._add_refresh_row(window)
         self._threshold_spins: dict[str, QSpinBox] = {}
         for label, name, tooltip, key in THRESHOLD_ROWS:
@@ -1010,7 +1052,7 @@ class TrayIcon(QSystemTrayIcon):
         `toolTipsVisible`),而指针落在行内的标签上时归属的是行容器 —— 标签与尾随标签都不接收
         鼠标事件,所以**整行任意位置**都是同一句提示。
         """
-        holder = QWidget(self._menu)
+        holder = MenuRow(self._menu)  # 自己画当前项底色,见 MenuRow
         layout = QHBoxLayout(holder)
         layout.setContentsMargins(MENU_ITEM_INDENT, 4, 10, 4)
         layout.setSpacing(8)
@@ -1027,11 +1069,38 @@ class TrayIcon(QSystemTrayIcon):
             layout.addWidget(trailing)
 
         holder.setToolTip(tooltip)
+        # 控件行不参与 QMenu 的"当前项"跟踪(指针落在行里时事件被行内控件吃掉,菜单收不到 move),
+        # 于是当前项会停在上一个纯文字项上;那时点本行空白处,事件冒泡到菜单 → 误触那一项
+        # (**用户就是这样误开"鼠标穿透"的**)。两处兜住:
+        #   1. 本行自己吃掉鼠标事件、不往上冒 —— 点空白处什么也不发生;
+        #   2. 指针进入本行时把菜单当前项指到本行的 action —— 陈旧高亮立刻消失(见 eventFilter)。
+        holder.setAttribute(Qt.WA_NoMousePropagation)
+
         action = QWidgetAction(self._menu)
         action.setText(name)  # 控件行本身没有文字,给 action 一个名字便于断言与调试
         action.setToolTip(tooltip)
         action.setDefaultWidget(holder)
         self._menu.addAction(action)  # 插在哪由 __init__ 里的调用点决定
+        self._row_actions[holder] = action
+        holder.installEventFilter(self)  # 进入 / 离开本行时同步菜单的当前项
+
+    def eventFilter(self, obj, event) -> bool:
+        """指针进出控件行时,把菜单的"当前项"跟着指过去。
+
+        `QMenu` 只按自己的 `mouseMoveEvent` 跟踪当前项;指针在控件行里时事件被行内控件吃掉,
+        菜单收不到 —— 当前项于是停在上一个纯文字项上(视觉上"高亮在鼠标穿透,而鼠标在别处"),
+        点空白处还会误触它。这里补上这一段,行为就与纯文字项一致了。
+        """
+        action = self._row_actions.get(obj)
+        if action is not None:
+            if event.type() == QEvent.Type.Enter:
+                if self._menu.isVisible():  # 菜单没弹时别去改它的当前项
+                    self._menu.setActiveAction(action)
+                obj.set_hovered(True)
+            elif event.type() == QEvent.Type.Leave:
+                self._menu.setActiveAction(None)
+                obj.set_hovered(False)
+        return False
 
     def _add_opacity_row(self, window: StatusBarWindow) -> None:
         """一行「透明度」滑杆(未报警时的不透明度)。
