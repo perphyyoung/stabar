@@ -969,9 +969,9 @@ class TrayIcon(QSystemTrayIcon):
 
         # 四行控件(位置由这里的调用点决定):刷新频率紧跟"立即刷新",三个步进器挨在一起,
         # 透明度排在两条警戒线之后,再往后才是勾选项
-        self._row_actions: dict[
-            QWidget, QAction
-        ] = {}  # 控件行容器 -> 该行的 action(见 eventFilter)
+        # 控件行容器 / 行内控件 各自指向该行的 action(见 eventFilter、_release_row_focus)
+        self._row_actions: dict[QWidget, QAction] = {}
+        self._row_controls: dict[QWidget, QAction] = {}
         self._add_refresh_row(window)
         self._threshold_spins: dict[str, QSpinBox] = {}
         for label, name, tooltip, key in THRESHOLD_ROWS:
@@ -998,6 +998,8 @@ class TrayIcon(QSystemTrayIcon):
         self._menu.addSeparator()
         self._menu.addAction("退出", QApplication.quit).setToolTip("退出 stabar")
         self._menu.aboutToShow.connect(self._sync_state)
+        # 收起时清掉控件行的焦点:留着它,再打开时 Qt 会把焦点恢复给上次那个步进器
+        self._menu.aboutToHide.connect(self._release_row_focus)
         # 托盘菜单弹出的唯一留痕:真右键托盘图标时只有它能证明"点击真的到了图标上"
         self._menu.aboutToShow.connect(lambda: log.debug("event=menu open=tray"))
         # 同窗口右键菜单:记下选中的是哪一项
@@ -1082,7 +1084,9 @@ class TrayIcon(QSystemTrayIcon):
         action.setDefaultWidget(holder)
         self._menu.addAction(action)  # 插在哪由 __init__ 里的调用点决定
         self._row_actions[holder] = action
+        self._row_controls[widget] = action
         holder.installEventFilter(self)  # 进入 / 离开本行时同步菜单的当前项
+        widget.installEventFilter(self)  # 滚轮不要改值(见 eventFilter)
 
     def eventFilter(self, obj, event) -> bool:
         """指针进出控件行时,把菜单的"当前项"跟着指过去。
@@ -1090,6 +1094,9 @@ class TrayIcon(QSystemTrayIcon):
         `QMenu` 只按自己的 `mouseMoveEvent` 跟踪当前项;指针在控件行里时事件被行内控件吃掉,
         菜单收不到 —— 当前项于是停在上一个纯文字项上(视觉上"高亮在鼠标穿透,而鼠标在别处"),
         点空白处还会误触它。这里补上这一段,行为就与纯文字项一致了。
+
+        另:行内控件(步进器 / 滑杆)默认认滚轮,鼠标划过就改值 —— 菜单里这等于"手一抖就改配置",
+        直接拦下(只在 DEBUG 留一行,便于回答"我滚了怎么没反应")。
         """
         action = self._row_actions.get(obj)
         if action is not None:
@@ -1100,7 +1107,25 @@ class TrayIcon(QSystemTrayIcon):
             elif event.type() == QEvent.Type.Leave:
                 self._menu.setActiveAction(None)
                 obj.set_hovered(False)
+        row = self._row_controls.get(obj)
+        if row is not None and event.type() == QEvent.Type.Wheel:
+            log.debug("event=wheel_ignored row=%s", row.text())
+            return True
         return False
+
+    def _release_row_focus(self) -> None:
+        """菜单收起时把控件行的焦点交还出去(接线在 `__init__` 的 `aboutToHide`)。
+
+        不清的话,那个步进器收起后仍是菜单窗口的焦点控件,**再打开时 Qt 会把焦点恢复给它**
+        (实测:收起再打开,`hasFocus=True` 且文本仍是全选态),于是按 ↓ 想往下走菜单,实际改的是
+        那个阈值 —— 按键先送到焦点控件,被它吃掉就不会进菜单。系统原生菜单收起后不留焦点,
+        这里与它对齐。
+        """
+        for control in self._row_controls:
+            control.clearFocus()
+            line = getattr(control, "lineEdit", None)  # 步进器:顺带取消全选,免得看起来还"亮着"
+            if line is not None:
+                line().deselect()
 
     def _add_opacity_row(self, window: StatusBarWindow) -> None:
         """一行「透明度」滑杆(未报警时的不透明度)。

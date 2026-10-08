@@ -1,8 +1,8 @@
 """TrayIcon:菜单内容与顺序、透明度滑杆、刷新步进器、勾选联动、显示切换、提示文字。"""
 
 import pytest
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QColor, QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QLabel
 
 import main
@@ -37,6 +37,20 @@ def strip_mean(image, top: int, bottom: int, x0: int = 8, x1: int = 25) -> tuple
             total[2] += color.blue()
             count += 1
     return tuple(round(value / count) for value in total)
+
+
+def wheel_event() -> QWheelEvent:
+    """一次向下滚轮(Qt 6 的构造签名很长,这里只填必需字段)。"""
+    return QWheelEvent(
+        QPointF(10, 10),
+        QPointF(100, 100),
+        QPoint(0, 0),
+        QPoint(0, -120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
 
 
 def test_widget_row_follows_the_menu_highlight(window, tray) -> None:
@@ -76,6 +90,53 @@ def test_widget_row_follows_the_menu_highlight(window, tray) -> None:
         # 真平台的实测值(两边都是 43)记在 docstring 与 `开发经验.md` 第 34 条。
         QApplication.sendEvent(holder, QEvent(QEvent.Type.Enter))
         assert background() == hovered  # 再次进入:底色可复现
+    finally:
+        menu.close()
+
+
+def test_menu_reopens_without_row_focus(window, tray) -> None:
+    """收起菜单再打开,不该还停在上次改的那一格。
+
+    曾经的现象(实测):收起再打开,那个步进器仍是焦点控件、文本仍是全选态 —— 于是按 ↓ 想往下走
+    菜单,实际改的是阈值(按键先送到焦点控件,被它吃掉就不会进菜单)。修法见 `_release_row_focus`。
+    """
+    menu = tray.contextMenu()
+    spin = tray._threshold_spins["warn"]
+    first = menu.actions()[0]
+
+    menu.popup(QPoint(400, 300))
+    try:
+        spin.setFocus()  # 鼠标点它的等价物
+        spin.lineEdit().selectAll()
+        assert menu.focusWidget() is spin
+
+        menu.hide()
+        menu.popup(QPoint(400, 300))
+        assert menu.focusWidget() is None  # 焦点不再残留
+        assert spin.lineEdit().selectedText() == ""  # 也不再"看起来还选中"
+
+        # 菜单能正常走:↓ 让当前项往下挪 —— 按键没被残留焦点吃掉
+        menu.setActiveAction(first)
+        QApplication.sendEvent(
+            menu, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier)
+        )
+        assert menu.activeAction() is not first
+    finally:
+        menu.close()
+
+
+def test_wheel_over_rows_does_not_change_values(window, tray) -> None:
+    """鼠标划过控件行滚轮不该改值 —— 步进器与滑杆默认都认滚轮,菜单里那是"手一抖就改配置"。"""
+    menu = tray.contextMenu()
+    menu.popup(QPoint(400, 300))
+    try:
+        for control in (tray._threshold_spins["warn"], tray._opacity_slider):
+            # 放到量程中间:挨着边界时"没变"可能只是到头了,那就白测了
+            control.setValue((control.minimum() + control.maximum()) // 2)
+            before = control.value()
+            # 直接问过滤器本身 —— 不经过投递,免得测成"Qt 在这个平台怎么送滚轮"
+            assert tray.eventFilter(control, wheel_event()) is True
+            assert control.value() == before
     finally:
         menu.close()
 
