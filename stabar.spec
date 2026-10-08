@@ -4,9 +4,10 @@
 用法: uv run pyinstaller --noconfirm --clean stabar.spec
 
 为什么需要这个文件: PySide6 的官方钩子会把 PySide6 包目录里的 DLL 成批收进来,
-其中大部分(Quick/Qml/Pdf/Network/OpenGL/Svg、软件 OpenGL 回退、Qt 翻译、
-图片格式与网络相关插件)我们一个都用不到。本组件只用 QtCore / QtGui / QtWidgets
-加 Qt 自绘,所以这里把它们显式剔掉,体积可以从 111MB 降到 50MB 量级。
+其中大部分(Quick/Qml/Pdf/OpenGL/Svg、软件 OpenGL 回退、Qt 翻译、图片格式、
+TLS 相关插件)我们一个都用不到。本组件用 QtCore / QtGui / QtWidgets + Qt 自绘,
+另外用 QtNetwork 里的**本地命名管道**做单实例(见 `single_instance.py`),
+所以这里把其余用不到的显式剔掉,体积可以从 111MB 降到 50MB 量级。
 """
 
 import os
@@ -21,7 +22,8 @@ PYSIDE_EXCLUDES = [
     "PySide6.QtQuickControls2",
     "PySide6.QtPdf",
     "PySide6.QtPdfWidgets",
-    "PySide6.QtNetwork",
+    # QtNetwork 保留:单实例用的是它的 QLocalServer / QLocalSocket(命名管道)——
+    # 它只能本地通信,用不到 TLS/OpenSSL,那几项仍然照裁(见下面的 _drop 列表)
     "PySide6.QtOpenGL",
     "PySide6.QtOpenGLWidgets",
     "PySide6.QtSvg",
@@ -77,14 +79,12 @@ DROP_BASENAMES = {
     "qt6qmlmeta.dll",
     "qt6qmlworkerscript.dll",
     "qt6pdf.dll",
-    "qt6network.dll",
     "qt6opengl.dll",
     "qt6svg.dll",
     "qt6virtualkeyboard.dll",
-    "qtnetwork.pyd",
     # Mesa 软件 OpenGL 回退:本组件只用 QPainter 光栅绘制,不碰 OpenGL
     "opengl32sw.dll",
-    # 只被 Qt6Network 拉进来的 OpenSSL
+    # 只有 TLS 才用得到 —— 单实例只是本地命名管道,不碰 TLS
     "libcrypto-3-x64.dll",
     "libssl-3-x64.dll",
     # 平台插件:只保留 qwindows.dll

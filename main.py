@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
 
 import dialogs
 import logging_setup
+import single_instance
 
 # ======================================================================
 # 观感调节区:想让小组件更醒目,只动这一块(平时的不透明度:托盘菜单或配置文件)
@@ -997,6 +998,18 @@ class StatusBarWindow(QWidget):
         # 开启后只能从托盘关掉,日志里必须留下这一笔,否则"窗口怎么点都没反应"查不出来
         log.info("event=click_through enabled=%s", enabled)
 
+    def reveal(self) -> None:
+        """把小组件叫出来(第二个实例启动时用,见 `single_instance.py`)。
+
+        穿透开着就一并关掉:否则显示出来也点不到,用户只会觉得"启动了但没反应"。
+        """
+        if self.windowFlags() & Qt.WindowTransparentForInput:
+            self.set_click_through(False)
+        if not self.isVisible():
+            self.show()
+            log.info("event=window state=shown reason=second_instance")
+        self.raise_()  # 置顶窗口之间的次序:确保它不在别的窗口后面
+
     # ---- 隐藏:恢复入口只有托盘 ----
     def hide_widget(self) -> None:
         """隐藏小组件,并把悬停态清干净 —— 否则下次显示出来会停在全亮。"""
@@ -1589,6 +1602,14 @@ def main() -> int:
     # 打包成 --noconsole 后 stderr 是 None:先记下来,省得以后怀疑日志缺了控制台那一半
     log.debug("event=start stderr=%s", "none" if sys.stderr is None else "available")
 
+    # 单实例:同一份配置目录只允许一个进程 —— 两份会互相覆盖配置、共用一份日志
+    # (启动时的"超限清空"会把对方的内容一起清掉),托盘还会多出一个图标让人分不清。
+    # 再启动一次是**常见路径**:自启已经拉起过了,用户又双击了一次 exe。
+    single = single_instance.SingleInstance(config_dir())
+    if not single.acquire():
+        log.info("event=single_instance action=exit")  # 上面的通知已让已有实例显示小组件
+        return 0
+
     # 有托盘图标,隐藏小组件后程序要继续活着,不能因为窗口不可见就退出
     app.setQuitOnLastWindowClosed(False)
 
@@ -1605,6 +1626,7 @@ def main() -> int:
         # 托盘是隐藏 / 穿透之后唯一的恢复入口,没有它小组件藏起来就找不回来了
         log.warning("event=tray state=unavailable hint=隐藏后将无法从托盘恢复")
 
+    single.activated(window.reveal)  # 第二个实例启动 → 把小组件叫出来
     app.aboutToQuit.connect(lambda: log.info("event=stop"))
     return app.exec()
 

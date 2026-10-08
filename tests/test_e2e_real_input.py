@@ -308,3 +308,33 @@ def test_real_tray_menu_hides_window(app) -> None:
 
     assert is_visible(app.hwnd) == 0  # 外部事实
     assert_in_order(app.events(), "event=menu open=tray", "event=menu item=隐藏")
+
+
+def test_second_launch_wakes_the_running_instance(app) -> None:
+    """同一份配置再启动一次:新进程自己退出,已有实例的小组件被叫出来。
+
+    单实例走命名管道,而管道名按**配置目录**派生(`single_instance.instance_name`)—— 所以这里
+    要显式把第二个进程的 `STABAR_CONFIG_DIR` 指到同一个目录(其余用例各拿一份 tmp,互不干扰)。
+    """
+    # 先藏起来,"被唤醒"才有可观察的变化
+    guarded(lambda: right_click(app.hwnd))
+    assert app.wait("event=menu open=context", 3), "右键没有弹出菜单"
+    guarded(lambda: click_menu_item("隐藏|显示"))
+    assert app.wait("event=window state=hidden", 3), "没藏起来"
+    assert is_visible(app.hwnd) == 0
+
+    env = {**os.environ, "STABAR_CONFIG_DIR": str(app.ini.parent), "STABAR_LOG_LEVEL": "DEBUG"}
+    env.pop("QT_QPA_PLATFORM", None)  # 子进程必须跑真平台,见文件头
+    second = subprocess.Popen(launch_command(), env=env, cwd=str(BASE))
+    try:
+        assert second.wait(timeout=15) == 0, "第二个实例没有干净退出"
+    finally:
+        if second.poll() is None:
+            _stop(second)
+
+    assert app.wait("event=single_instance action=exit", 5), "第二个实例没留下日志"
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and is_visible(app.hwnd) == 0:
+        time.sleep(0.1)
+    assert is_visible(app.hwnd) == 1, "已有实例的小组件没有被唤醒"
+    assert app.wait("event=single_instance action=activate", 5), "没记下唤醒事件"
