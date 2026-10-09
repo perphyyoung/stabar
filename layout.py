@@ -1,16 +1,20 @@
-"""纯计算:尺寸与贴边的几何、文字与配色的换算。
+"""纯计算与可调量程:尺寸与贴边的几何、文字与配色的换算,以及各项允许的取值范围。
 
 这些函数**不依赖 Qt 的窗口/事件循环**(只用 `QSize` / `QColor` 这类值类型),所以第 1 层用例
 直接调用它们(见 `tests/test_helpers.py`);窗口与托盘只是它们的消费方。
 
 搬进这里的原因只有一个:主界面代码太长,而这些算式与界面无关 —— 改尺寸常量时,重排(`main`)、
-动画目标、用例断言三处必须同步,算式放在一处才不会各推一遍。
+动画目标、用例断言三处必须同步;取值范围则被"窗口读配置 / 托盘给滑杆量程"两处共用。都放在这里,
+才不会各推一遍。
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor
+
+# 首次运行的不透明度(之后以配置文件里的值为准:程序启动会把生效值回写)
+FIRST_RUN_IDLE_OPACITY = 0.30
 
 # --- 尺寸与屏幕边距 ---
 UI_SCALE_DEFAULT = 1.0  # 整窗缩放的首次运行值(系数,不是像素)
@@ -167,6 +171,52 @@ def is_lit(max_ratio: float, lit: float, danger: float) -> bool:
 def percent_text(value: float) -> str:
     """把 0.85 这样的值写成给人看的百分比(滑杆右侧标签、还原框里的阈值共用)。"""
     return f"{round(value * 100)}%"
+
+
+# --- 各项的取值量程:窗口读配置时夹取、托盘给滑杆 / 步进器定量程,两头共用 ---
+REFRESH_MIN_S = 1  # 刷新间隔(秒)的量程
+REFRESH_MAX_S = 60
+LIVE_OPACITY = 1.00  # 鼠标悬停 / 自动提亮时的不透明度
+MIN_OPACITY = 0.05  # 不透明度下限(再小就真的看不见了;滑杆的最小格也是它)
+OPACITY_STEP = 0.05  # 滑杆步进(5%):一格一档,拖动与键盘都是这个粒度
+OPACITY_STEPS = round(1.0 / OPACITY_STEP)  # 滑杆格数(1 格 = 5%,共 20 格)
+THRESHOLD_MIN = 0.01  # 三条阈值:托盘按百分比显示,存盘是 1% 粒度的小数
+THRESHOLD_MAX = 1.00
+THRESHOLD_STEP = 0.01  # 一格 = 1%
+THRESHOLD_GAP = 0.01  # 橙色与常亮都必须比红色至少低一格(橙色与常亮之间不设约束)
+UI_SCALE_MIN = 0.6  # 整窗缩放的下限:再小就看不清了
+UI_SCALE_MAX = 2.0  # 上限:再大就占满屏
+SCALE_UNIT = 0.01  # 缩放滑杆一格 = 1%
+
+
+def scale_units(scale: float) -> int:
+    """缩放系数 -> 滑杆格数(一格 1%,所以格数就是百分数)。"""
+    return min(
+        round(UI_SCALE_MAX / SCALE_UNIT),
+        max(round(UI_SCALE_MIN / SCALE_UNIT), round(scale / SCALE_UNIT)),
+    )
+
+
+def scale_from_units(units: int) -> float:
+    """滑杆格数 -> 缩放系数。"""
+    return min(UI_SCALE_MAX, max(UI_SCALE_MIN, units * SCALE_UNIT))
+
+
+def opacity_units(value: float) -> int:
+    """不透明度 -> 滑杆格数。
+
+    配置文件里可以写任意精度(如 0.33),滑杆表达不了就取最近的一格;标签仍显示真实值。
+    """
+    return min(OPACITY_STEPS, max(1, round(value * OPACITY_STEPS)))
+
+
+def opacity_from_step(step: int) -> float:
+    """滑杆格数 -> 不透明度。
+
+    用"格数 / 总格数"而不是"格数 × 0.05":后者带浮点尾巴(14 × 0.05 = 0.7000000000000001),
+    写进配置文件就成了难看的 `idle_opacity=0.7000000000000001`。
+    """
+    return step / OPACITY_STEPS
 
 
 def human_size(n: float) -> str:

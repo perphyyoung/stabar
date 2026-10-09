@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from PySide6.QtCore import QtMsgType
 
+import layout
 import logging_setup
 import main
 import paths
@@ -171,6 +172,6 @@ def test_clamped_opacity_is_logged(app_log, scratch_log, qtbot, monkeypatch, low
     window = main.StatusBarWindow()
     qtbot.addWidget(window)
 
-    assert f"event=config_clamped key=idle_opacity value=0.0 used={main.MIN_OPACITY}" in (
+    assert f"event=config_clamped key=idle_opacity value=0.0 used={layout.MIN_OPACITY}" in (
         scratch_log.text()
     )

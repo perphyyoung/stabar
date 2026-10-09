@@ -76,10 +76,10 @@ class FakeWinreg:
 @pytest.fixture
 def fake_registry(monkeypatch) -> FakeWinreg:
     """注入假的 winreg:测注册表逻辑,但一个字节都不写真实注册表。"""
-    import main
+    import tray
 
     fake = FakeWinreg()
-    monkeypatch.setattr(main, "winreg", fake)
+    monkeypatch.setattr(tray, "winreg", fake)  # 开机自启在托盘那边,winreg 也归它
     return fake
 
 

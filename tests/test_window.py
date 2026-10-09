@@ -18,12 +18,13 @@ import drives
 import layout
 import main
 import paths
+import tray
 
 
 def test_low_usage_keeps_configured_opacity(window) -> None:
     """低占用时严格按配置的不透明度显示,提亮完全不介入。"""
     assert window._level == 0.0
-    assert window._bars[0]._alpha == pytest.approx(main.FIRST_RUN_IDLE_OPACITY * 255)
+    assert window._bars[0]._alpha == pytest.approx(layout.FIRST_RUN_IDLE_OPACITY * 255)
 
 
 def test_hover_details_cover_the_whole_window(window) -> None:
@@ -47,7 +48,7 @@ def test_hover_text_has_one_source_and_two_lengths(window) -> None:
     full, compact = window.summary(), window.summary(compact=True)
     assert "\n" in full and "\n" not in compact  # 完整版多行、紧凑版一行
     assert all(bar.short_text() in compact for bar in window._bars)
-    assert len(compact) <= main.TRAY_TIP_MAX
+    assert len(compact) <= tray.TRAY_TIP_MAX
 
 
 def test_brightness_only_from_hover_or_thresholds(window, monkeypatch) -> None:
@@ -75,7 +76,7 @@ def test_threshold_config_clamped_and_order_enforced(window, events) -> None:
     """阈值读入:越界夹取、反序拉回调(橙色至少比红色低 1%),都留 WARNING。"""
     window._settings.setValue("danger_threshold", 1.5)
     assert window._read_threshold("danger_threshold", main.DANGER_THRESHOLD) == pytest.approx(
-        main.THRESHOLD_MAX
+        layout.THRESHOLD_MAX
     )
     window._settings.setValue("warn_threshold", "abc")
     assert window._read_threshold("warn_threshold", main.WARN_THRESHOLD) == pytest.approx(
@@ -99,7 +100,7 @@ def test_refresh_seconds_config_is_clamped(window, events) -> None:
     """配置里的刷新秒数生效;超出量程就夹取到步进器的范围并留痕(与 idle_opacity 同一套规则)。"""
     window._settings.setValue("refresh_seconds", 600)
     window._settings.sync()
-    assert window._read_refresh_seconds() == main.REFRESH_MAX_S
+    assert window._read_refresh_seconds() == layout.REFRESH_MAX_S
 
     window._settings.setValue("refresh_seconds", "abc")
     assert window._read_refresh_seconds() == main.REFRESH_DEFAULT_S
@@ -117,7 +118,7 @@ def test_hover_is_instant_and_reverts_instantly(window, events) -> None:
     QApplication.sendEvent(window, QEvent(QEvent.Type.Enter))
     assert window._bars[0]._alpha == pytest.approx(255)
     QApplication.sendEvent(window, QEvent(QEvent.Type.Leave))
-    assert window._bars[0]._alpha == pytest.approx(main.FIRST_RUN_IDLE_OPACITY * 255)
+    assert window._bars[0]._alpha == pytest.approx(layout.FIRST_RUN_IDLE_OPACITY * 255)
 
     assert_in_order(
         events(),
@@ -166,9 +167,9 @@ def test_ui_scale_resizes_window_bars_and_persists(window, tmp_path) -> None:
 def test_ui_scale_is_clamped(window) -> None:
     """拖到极限就停住:下限防"小到看不见",上限防"占满屏"。"""
     window.set_ui_scale(9.0)
-    assert window.ui_scale == pytest.approx(main.UI_SCALE_MAX)
+    assert window.ui_scale == pytest.approx(layout.UI_SCALE_MAX)
     window.set_ui_scale(0.01)
-    assert window.ui_scale == pytest.approx(main.UI_SCALE_MIN)
+    assert window.ui_scale == pytest.approx(layout.UI_SCALE_MIN)
 
 
 def test_hide_widget_clears_hover_state(window) -> None:
@@ -325,10 +326,10 @@ def test_tail_size_is_fixed_and_ignores_the_ui_scale(window, qtbot) -> None:
     before = window.tail_size()
     window.set_ui_scale(2.0)
     assert window.tail_size() == before
-    window.set_ui_scale(main.UI_SCALE_MIN)
+    window.set_ui_scale(layout.UI_SCALE_MIN)
     assert window.tail_size() == before
     # 展开形态仍然跟着缩放走(它才是"调整尺寸"的作用对象)
-    assert window.full_size().width() == round(layout.WINDOW_W * main.UI_SCALE_MIN)
+    assert window.full_size().width() == round(layout.WINDOW_W * layout.UI_SCALE_MIN)
 
 
 def test_committing_ui_scale_re_arms_the_collapse(window, qtbot) -> None:
@@ -423,7 +424,7 @@ def test_config_is_written_back_on_first_run(window) -> None:
     """启动回写让配置文件自解释:没有这个键时补上生效值。"""
     path = paths.settings_path()
     assert path.exists()
-    assert f"idle_opacity={main.FIRST_RUN_IDLE_OPACITY}" in path.read_text(encoding="utf-8")
+    assert f"idle_opacity={layout.FIRST_RUN_IDLE_OPACITY}" in path.read_text(encoding="utf-8")
 
 
 def test_out_of_screen_position_is_clamped(

@@ -111,6 +111,15 @@ def icon_path() -> Path:
     return Path(__file__).with_name(ICON_NAME)
 
 
+def entry_script() -> Path:
+    """开发形态下自启要跑的那个脚本:项目目录里的 `main.py`(打包后不用它)。
+
+    单独抽出来是因为写注册表的那段代码在 `tray.py` —— 如果那里用 `Path(__file__)`,
+    自启会去启动 `tray.py`,那不是入口。
+    """
+    return Path(__file__).with_name("main.py")
+
+
 def open_path(path: Path) -> None:
     """用系统默认程序打开一个路径(这里只用来开目录)。
 

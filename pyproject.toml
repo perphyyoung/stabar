@@ -23,6 +23,7 @@ py-modules = [
     "logging_setup",
     "paths",
     "single_instance",
+    "tray",
 ]
 
 [dependency-groups]
