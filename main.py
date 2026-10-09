@@ -18,14 +18,11 @@
 
 from __future__ import annotations
 
-import ctypes
 import importlib.metadata
 import logging
 import os
-import shutil
 import sys
 import winreg
-from ctypes import wintypes
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -72,6 +69,7 @@ from PySide6.QtWidgets import (
 )
 
 import dialogs
+import drives
 import logging_setup
 import single_instance
 
@@ -82,11 +80,6 @@ import single_instance
 APP_NAME = "stabar"  # 决定打包后配置目录的名字
 # 版本号**不在这里**:唯一来源是 pyproject.toml 的 [project] version,运行时由 app_version() 读它。
 # 不要为了省一次读文件而在代码里另抄一份 —— 抄了就会有一天忘了同步。
-# 要监控的盘符**不写死**:运行时探测(见 detect_drives —— 固定盘 + 可移动盘,含移动硬盘),
-# 配置文件里的 `drives` 可以只挑几个(见 visible_drives)。
-DRIVES_KEY = "drives"
-DRIVES_AUTO = "auto"  # ini 里的"自动";解析后是 None
-MAX_DRIVES = 8  # 显示上限:窗口高度 = 盘数 × 行高,再多就太占屏幕
 REFRESH_MS = 15_000  # 刷新间隔的默认值(毫秒);托盘菜单可改(见 refresh_seconds)
 REFRESH_MIN_S = 1  # 托盘步进器允许的最小秒数
 REFRESH_MAX_S = 60  # 托盘步进器允许的最大秒数
@@ -449,7 +442,12 @@ RESETTABLE_SETTINGS = (
     ("lit_threshold", "常亮阈值", LIT_THRESHOLD, percent_text),
     ("idle_opacity", "未报警透明度", FIRST_RUN_IDLE_OPACITY, percent_text),
     (EDGE_HIDE_KEY, "贴边隐藏", EDGE_HIDE_DEFAULT, lambda value: "开" if value else "关"),
-    (DRIVES_KEY, "显示的盘符", None, lambda value: "自动" if value is None else drives_text(value)),
+    (
+        drives.DRIVES_KEY,
+        "显示的盘符",
+        None,
+        lambda value: "自动" if value is None else drives.drives_text(value),
+    ),
 )
 
 
@@ -502,108 +500,6 @@ def draw_outlined_text(
 # ======================================================================
 
 log = logging.getLogger(APP_NAME)
-
-
-# ======================================================================
-# 数据读取
-# ======================================================================
-
-
-def read_disk(path: str) -> tuple[int, int] | None:
-    """返回 (已用字节, 总字节);盘符不存在时返回 None。"""
-    try:
-        usage = shutil.disk_usage(path)
-    except OSError:
-        return None
-    return usage.used, usage.total
-
-
-# --- 盘符探测:哪些盘要显示 ---
-# Win32 的驱动器类型(GetDriveTypeW 的返回值)。**固定盘里就包含 USB 硬盘盒** ——
-# 它报的是 FIXED 而不是 REMOVABLE,所以"要含移动硬盘"靠的是这两个类型一起收。
-DRIVE_REMOVABLE = 2
-DRIVE_FIXED = 3
-KEEP_DRIVE_TYPES = (DRIVE_FIXED, DRIVE_REMOVABLE)
-
-_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-_kernel32.GetLogicalDriveStringsW.argtypes = (wintypes.DWORD, wintypes.LPWSTR)
-_kernel32.GetLogicalDriveStringsW.restype = wintypes.DWORD
-_kernel32.GetDriveTypeW.argtypes = (wintypes.LPCWSTR,)
-_kernel32.GetDriveTypeW.restype = wintypes.UINT
-
-
-def drive_roots() -> list[str]:
-    """系统里所有已分配盘符的根(形如 "C:/");拿不到就返回空表并留痕。"""
-    size = _kernel32.GetLogicalDriveStringsW(0, None)  # 先问长度,再按长度取
-    if not size:
-        log.warning("event=drives error=GetLogicalDriveStringsW code=%s", ctypes.get_last_error())
-        return []
-    buffer = ctypes.create_unicode_buffer(size + 1)
-    _kernel32.GetLogicalDriveStringsW(size, buffer)
-    return [f"{part[0]}:/" for part in buffer[:size].split("\0") if part]
-
-
-def detect_drives() -> list[str]:
-    """**已加载**的盘符(含移动硬盘):固定盘 + 可移动盘,而且**试读得到**。
-
-    试读那一步是决定性的:空光驱、读卡器无卡、拔掉的盘都会在这里被排除 —— 主界面上不会出现
-    一排永远"不可用"的行,也不必维护"哪些类型要排除"的白名单。
-
-    映射的网络盘先按类型排除:它即使在线,`disk_usage` 也可能卡住几秒,而这一步跑在 UI 线程上
-    (要看网络盘就把字母写进 ini 的 `drives`,那里的代价由配置的人自己承担)。
-    """
-    usable = [
-        root
-        for root in drive_roots()
-        if _kernel32.GetDriveTypeW(root) in KEEP_DRIVE_TYPES and read_disk(root) is not None
-    ]
-    return sorted(usable)
-
-
-def parse_drives(raw: object) -> tuple[list[str] | None, list[str]]:
-    """解析 ini 里的 `drives` →(要显示的盘符 | None = 自动, 被丢掉的非法项)。
-
-    `auto`(默认)或空 → (None, []);`C,E` → (["C:/", "E:/"], []);`C:`、`c:\\`、多余空格都认。
-    写坏的项丢掉,全坏就当自动 —— 一个笔误不该让小组件变成空的。
-
-    ⚠️ **两种形状都要认**:`QSettings` 会把带逗号的值读成**列表**(`drives=C,D` → `["C", "D"]`),
-    只写字符串一种会在"写了两个盘"时静默退化成自动(实测踩到:E2E 里窗口多出一行、尾巴长度对不上)。
-    """
-    if isinstance(raw, (list, tuple)):
-        text = ",".join(str(item) for item in raw).strip()
-    else:
-        text = str(raw).strip()
-    if not text or text.lower() == DRIVES_AUTO:
-        return None, []
-    wanted: list[str] = []
-    dropped: list[str] = []
-    for raw_token in text.replace(";", ",").split(","):
-        token = raw_token.strip()
-        if not token:
-            continue
-        letter, tail = token[:1].upper(), token[1:]
-        if "A" <= letter <= "Z" and tail in ("", ":", ":/", ":\\"):
-            if letter not in wanted:
-                wanted.append(letter)
-        else:
-            dropped.append(token)
-    return ([f"{letter}:/" for letter in wanted] if wanted else None), dropped
-
-
-def visible_drives(detected: list[str], wanted: list[str] | None) -> list[str]:
-    """最终显示哪些盘:自动就用探测结果,白名单则**按写下的顺序**,两者都只取探测得到的。
-
-    白名单里的盘当场读不到就不显示(不保留一行永远"不可用"的行);超过 `MAX_DRIVES` 取前几个。
-    """
-    if wanted is None:
-        return sorted(detected)[:MAX_DRIVES]
-    detected_set = set(detected)
-    return [root for root in wanted if root in detected_set][:MAX_DRIVES]
-
-
-def drives_text(wanted: list[str] | None) -> str:
-    """把显示集合写成 ini 里的形式:`auto` 或 `C,D`。"""
-    return DRIVES_AUTO if wanted is None else ",".join(root[0] for root in wanted)
 
 
 def human_size(n: float) -> str:
@@ -698,7 +594,7 @@ class DiskBar(QWidget):
         super().__init__(parent)
         self._path = path
         self._label = path[0] + ":"
-        self._stats = read_disk(path)
+        self._stats = drives.read_disk(path)
         self._alpha = 255.0
         self._warned = False  # 警告色滞回标记
         # 两条警戒线可配(托盘菜单改),所以存在实例上;默认值就是常量的首次运行值
@@ -718,7 +614,7 @@ class DiskBar(QWidget):
         return self._path
 
     def reload(self) -> None:
-        self._stats = read_disk(self._path)
+        self._stats = drives.read_disk(self._path)
         self.update()
 
     def ratio(self) -> float | None:
@@ -1140,7 +1036,7 @@ class StatusBarWindow(QWidget):
             return self._refresh_seconds
         if key == EDGE_HIDE_KEY:
             return self._edge_hide
-        if key == DRIVES_KEY:
+        if key == drives.DRIVES_KEY:
             return self._wanted_drives
         return self.thresholds[key.removesuffix("_threshold")]
 
@@ -1175,8 +1071,8 @@ class StatusBarWindow(QWidget):
             self.set_refresh_seconds(targets["refresh_seconds"])
         if EDGE_HIDE_KEY in targets:
             self.set_edge_hide(bool(targets[EDGE_HIDE_KEY]))
-        if DRIVES_KEY in targets:
-            self.set_drives(targets[DRIVES_KEY])
+        if drives.DRIVES_KEY in targets:
+            self.set_drives(targets[drives.DRIVES_KEY])
         wanted = self.thresholds
         for key in ("warn_threshold", "danger_threshold", "lit_threshold"):
             if key in targets:
@@ -1213,12 +1109,12 @@ class StatusBarWindow(QWidget):
     # ---- 盘集:显示哪些盘 ----
     def _read_drives(self) -> list[str] | None:
         """读 ini 的 `drives`:auto(默认)= 用探测结果;写了字母表就是白名单。非法项丢掉并留痕。"""
-        raw = self._settings.value(DRIVES_KEY, DRIVES_AUTO)
-        wanted, dropped = parse_drives(raw)
+        raw = self._settings.value(drives.DRIVES_KEY, drives.DRIVES_AUTO)
+        wanted, dropped = drives.parse_drives(raw)
         if dropped:
             log.warning(
                 "event=config_invalid key=%s value=%s dropped=%s",
-                DRIVES_KEY,
+                drives.DRIVES_KEY,
                 raw,
                 ",".join(dropped),
             )
@@ -1232,7 +1128,7 @@ class StatusBarWindow(QWidget):
     def set_drives(self, wanted: list[str] | None) -> None:
         """提交要显示的盘符:落盘 + 立刻按新集合重建盘条。"""
         self._wanted_drives = wanted
-        self._settings.setValue(DRIVES_KEY, drives_text(wanted))
+        self._settings.setValue(drives.DRIVES_KEY, drives.drives_text(wanted))
         self._settings.sync()
         self._refresh_drives(reason="config", force=True)
 
@@ -1257,8 +1153,8 @@ class StatusBarWindow(QWidget):
 
     def _refresh_drives(self, *, reason: str, force: bool = False) -> bool:
         """盘集变了就重建盘条(每次刷新都来看一眼),返回是否重建了。"""
-        detected = detect_drives()
-        paths = visible_drives(detected, self._wanted_drives)
+        detected = drives.detect_drives()
+        paths = drives.visible_drives(detected, self._wanted_drives)
         if not force and paths == [bar.path for bar in self._bars]:
             return False
         log.info(

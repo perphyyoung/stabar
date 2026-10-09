@@ -9,6 +9,7 @@ from itertools import pairwise
 import pytest
 from e2e_support import center_of_rect, screen_bounds, visible_size
 
+import drives
 import main
 
 
@@ -131,37 +132,37 @@ def test_tail_layout_extends_the_line_with_more_rows() -> None:
 
 def test_parse_drives_accepts_letters_and_falls_back_to_auto() -> None:
     """ini 的 `drives`:auto / 空 → 自动;字母表 → 白名单;写坏的项丢掉,全坏回自动。"""
-    assert main.parse_drives(main.DRIVES_AUTO) == (None, [])
-    assert main.parse_drives("") == (None, [])
-    assert main.parse_drives("   ") == (None, [])
-    assert main.parse_drives("C,E") == (["C:/", "E:/"], [])
+    assert drives.parse_drives(drives.DRIVES_AUTO) == (None, [])
+    assert drives.parse_drives("") == (None, [])
+    assert drives.parse_drives("   ") == (None, [])
+    assert drives.parse_drives("C,E") == (["C:/", "E:/"], [])
     # 冒号、反斜杠、空格、分号都认;重复的并成一项
-    assert main.parse_drives("c: ; D:\\ ; C") == (["C:/", "D:/"], [])
+    assert drives.parse_drives("c: ; D:\\ ; C") == (["C:/", "D:/"], [])
     # 写坏的项丢掉,好的仍然生效
-    assert main.parse_drives("C,ZZ,9") == (["C:/"], ["ZZ", "9"])
+    assert drives.parse_drives("C,ZZ,9") == (["C:/"], ["ZZ", "9"])
     # 全坏 → 回自动(一个笔误不该让小组件变成空的)
-    assert main.parse_drives("ZZ") == (None, ["ZZ"])
+    assert drives.parse_drives("ZZ") == (None, ["ZZ"])
     # QSettings 会把带逗号的值读成**列表**:两种形状都要认
-    assert main.parse_drives(["C", "D"]) == (["C:/", "D:/"], [])
-    assert main.parse_drives(["C", "ZZ"]) == (["C:/"], ["ZZ"])
+    assert drives.parse_drives(["C", "D"]) == (["C:/", "D:/"], [])
+    assert drives.parse_drives(["C", "ZZ"]) == (["C:/"], ["ZZ"])
 
 
 def test_visible_drives_keeps_the_written_order_and_caps_the_count() -> None:
     """最终显示哪些盘:自动按字母序;白名单按写下的顺序,而且只在探测得到的里面挑。"""
     detected = ["D:/", "C:/", "F:/"]
-    assert main.visible_drives(detected, None) == ["C:/", "D:/", "F:/"]
-    assert main.visible_drives(detected, ["F:/", "C:/"]) == ["F:/", "C:/"]
-    assert main.visible_drives(detected, ["C:/", "Z:/"]) == ["C:/"]  # 当场读不到的盘不显示
-    many = [f"{chr(ord('C') + i)}:/" for i in range(main.MAX_DRIVES + 3)]
-    assert len(main.visible_drives(many, None)) == main.MAX_DRIVES
-    assert len(main.visible_drives(many, list(reversed(many)))) == main.MAX_DRIVES
+    assert drives.visible_drives(detected, None) == ["C:/", "D:/", "F:/"]
+    assert drives.visible_drives(detected, ["F:/", "C:/"]) == ["F:/", "C:/"]
+    assert drives.visible_drives(detected, ["C:/", "Z:/"]) == ["C:/"]  # 当场读不到的盘不显示
+    many = [f"{chr(ord('C') + i)}:/" for i in range(drives.MAX_DRIVES + 3)]
+    assert len(drives.visible_drives(many, None)) == drives.MAX_DRIVES
+    assert len(drives.visible_drives(many, list(reversed(many)))) == drives.MAX_DRIVES
 
 
 def test_drives_text_round_trips() -> None:
     """写回 ini 的形式:`auto` 或 `C,D`(与 `parse_drives` 互为逆运算)。"""
-    assert main.drives_text(None) == main.DRIVES_AUTO
-    assert main.drives_text(["C:/", "F:/"]) == "C,F"
-    assert main.parse_drives(main.drives_text(["C:/", "F:/"]))[0] == ["C:/", "F:/"]
+    assert drives.drives_text(None) == drives.DRIVES_AUTO
+    assert drives.drives_text(["C:/", "F:/"]) == "C,F"
+    assert drives.parse_drives(drives.drives_text(["C:/", "F:/"]))[0] == ["C:/", "F:/"]
 
 
 def test_layout_size_is_one_formula_for_window_and_morph() -> None:
@@ -222,5 +223,5 @@ def test_read_disk_returns_none_when_query_fails(monkeypatch) -> None:
     def boom(_path: str):
         raise OSError("no such drive")
 
-    monkeypatch.setattr(main.shutil, "disk_usage", boom)
-    assert main.read_disk("Z:/") is None
+    monkeypatch.setattr(drives.shutil, "disk_usage", boom)
+    assert drives.read_disk("Z:/") is None

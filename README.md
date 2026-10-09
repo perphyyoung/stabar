@@ -166,6 +166,7 @@ Quick/Qml/Pdf/OpenGL/Svg、Mesa 软件 OpenGL 回退、Qt 翻译、图片格式�
 ```
 main.py                          应用装配与界面:窗口、盘条、托盘、入口
 dialogs.py                       自绘小对话框(无边框 + 自绘标题栏)
+drives.py                        盘符:读占用、探测"已加载"的盘(含移动硬盘)、决定显示哪些
 logging_setup.py                 日志:级别策略、落盘、Qt 消息桥接、异常钩子
 single_instance.py               单实例:共享内存按配置目录原子认领,第二份经命名管道唤醒已有实例后退出
 日志使用说明.md                  日志级别、位置、事件清单与自动化测试用法

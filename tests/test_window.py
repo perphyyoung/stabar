@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+import drives
 import main
 
 
@@ -50,18 +51,18 @@ def test_brightness_only_from_hover_or_thresholds(window, monkeypatch) -> None:
     """非悬停时亮度只有 0/1:橙色阈值只改颜色;到常亮阈值或红色阈值才常亮。"""
     bar = window._bars[0]
 
-    monkeypatch.setattr(main, "read_disk", lambda path: (860, 1000))  # 86%:过橙线、未到常亮
+    monkeypatch.setattr(drives, "read_disk", lambda path: (860, 1000))  # 86%:过橙线、未到常亮
     window.refresh()
     assert window._target == 0.0  # 橙线不提亮
     assert bar._bar_color(0.86).name() == QColor(*main.COLOR_WARN).name()  # 但它变橙了
 
-    monkeypatch.setattr(main, "read_disk", lambda path: (910, 1000))  # 91%:过红线
+    monkeypatch.setattr(drives, "read_disk", lambda path: (910, 1000))  # 91%:过红线
     window.refresh()
     assert window._target == 1.0
 
     # 常亮阈值压到 50%:60% 就常亮,而颜色还是蓝的(橙线仍在 85%)
     window.set_thresholds(warn=0.85, lit=0.50, danger=0.90)
-    monkeypatch.setattr(main, "read_disk", lambda path: (600, 1000))
+    monkeypatch.setattr(drives, "read_disk", lambda path: (600, 1000))
     window.refresh()
     assert window._target == 1.0
     assert bar._bar_color(0.60).name() == QColor(*main.COLOR_ACCENT).name()
@@ -126,7 +127,7 @@ def test_hover_is_instant_and_reverts_instantly(window, events) -> None:
 
 def test_high_usage_brightens_to_full(window, qtbot, monkeypatch) -> None:
     """越过警告线后自动提亮到 100%;这条走动画,所以等它真正跑完。"""
-    monkeypatch.setattr(main, "read_disk", lambda path: (950, 1000))
+    monkeypatch.setattr(drives, "read_disk", lambda path: (950, 1000))
     window.refresh()
     qtbot.waitUntil(lambda: window._bars[0]._alpha == pytest.approx(255), timeout=3000)
 
@@ -180,7 +181,7 @@ def test_drive_set_follows_the_detector(window, monkeypatch) -> None:
     """盘集变了就重建盘条,窗口高度跟着走 —— 插上移动硬盘,它就出现在列表里。"""
     assert [bar.path for bar in window._bars] == ["C:/", "D:/"]
 
-    monkeypatch.setattr(main, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+    monkeypatch.setattr(drives, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
     window.refresh()
 
     assert [bar.path for bar in window._bars] == ["C:/", "D:/", "F:/"]
@@ -197,7 +198,7 @@ def test_drives_config_limits_what_is_shown(
     ini = tmp_path / "stabar.ini"
     ini.write_text("[General]\ndrives=C,D\n", encoding="utf-8")
     monkeypatch.setattr(main, "settings_path", lambda: ini)
-    monkeypatch.setattr(main, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+    monkeypatch.setattr(drives, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
 
     window = main.StatusBarWindow()
     qtbot.addWidget(window)
@@ -227,7 +228,7 @@ def test_drive_change_while_collapsed_re_arms_the_collapse(window, qtbot, monkey
     window._hide_to_edge()
     qtbot.waitUntil(lambda: window.size() == window.tail_size(), timeout=1000)
 
-    monkeypatch.setattr(main, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+    monkeypatch.setattr(drives, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
     window.refresh()
 
     assert len(window._bars) == 3  # 盘条已经是新的

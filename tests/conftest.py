@@ -86,19 +86,19 @@ def fake_registry(monkeypatch) -> FakeWinreg:
 @pytest.fixture
 def low_usage(monkeypatch) -> None:
     """把磁盘占用固定在 10%:低于提亮起点,得到确定的最暗档。"""
-    import main
+    import drives
 
-    monkeypatch.setattr(main, "read_disk", lambda path: (100, 1000))
+    monkeypatch.setattr(drives, "read_disk", lambda path: (100, 1000))
 
 
 @pytest.fixture
 def fake_drives(monkeypatch) -> list[str]:
     """把盘符探测钉成 `C:/` `D:/` —— "这台机器插了几个盘"不该决定用例的结果。"""
-    import main
+    import drives
 
-    drives = ["C:/", "D:/"]
-    monkeypatch.setattr(main, "detect_drives", lambda: list(drives))
-    return drives
+    roots = ["C:/", "D:/"]
+    monkeypatch.setattr(drives, "detect_drives", lambda: list(roots))
+    return roots
 
 
 @pytest.fixture

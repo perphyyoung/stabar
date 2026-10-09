@@ -4,11 +4,12 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
 
+import drives
 import main
 
 
 def make_bar(monkeypatch, used: int = 500, total: int = 1000) -> main.DiskBar:
-    monkeypatch.setattr(main, "read_disk", lambda path: (used, total))
+    monkeypatch.setattr(drives, "read_disk", lambda path: (used, total))
     bar = main.DiskBar("C:/")
     # 关键:不加这个属性,render() 会先铺一层不透明底色,量出来的 alpha 恒为 255
     bar.setAttribute(Qt.WA_TranslucentBackground)
@@ -25,7 +26,7 @@ def painted_alpha(bar: main.DiskBar, x: int, y: int) -> int:
 
 
 def test_ratio_none_when_drive_missing(monkeypatch, qapp) -> None:
-    monkeypatch.setattr(main, "read_disk", lambda path: None)
+    monkeypatch.setattr(drives, "read_disk", lambda path: None)
     assert main.DiskBar("Z:/").ratio() is None
 
 
@@ -84,5 +85,5 @@ def test_percent_label_has_one_decimal(monkeypatch, qapp) -> None:
     assert make_bar(monkeypatch, used=802, total=1000).percent_label() == "80.2%"
     assert make_bar(monkeypatch, used=1000, total=1000).percent_label() == "100.0%"
 
-    monkeypatch.setattr(main, "read_disk", lambda path: None)
+    monkeypatch.setattr(drives, "read_disk", lambda path: None)
     assert main.DiskBar("Z:/").percent_label() == "0.0%"  # 读不到数据也不能崩
