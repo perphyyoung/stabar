@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
 
 import drives
+import layout
 import main
 
 
@@ -13,13 +14,13 @@ def make_bar(monkeypatch, used: int = 500, total: int = 1000) -> main.DiskBar:
     bar = main.DiskBar("C:/")
     # 关键:不加这个属性,render() 会先铺一层不透明底色,量出来的 alpha 恒为 255
     bar.setAttribute(Qt.WA_TranslucentBackground)
-    bar.resize(240, main.ROW_H)
+    bar.resize(240, layout.ROW_H)
     return bar
 
 
 def painted_alpha(bar: main.DiskBar, x: int, y: int) -> int:
     """把 bar 画进一张自己掌控 alpha 的透明图,取指定像素的 alpha。"""
-    image = QImage(240, main.ROW_H, QImage.Format.Format_ARGB32_Premultiplied)
+    image = QImage(240, layout.ROW_H, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.transparent)
     bar.render(image)
     return image.pixelColor(x, y).alpha()
@@ -58,7 +59,7 @@ def test_alpha_controls_painted_opacity(monkeypatch, qapp) -> None:
     取盘符文字所在的那一像素:它被完整覆盖,所以 alpha 正好等于下发的值。
     """
     bar = make_bar(monkeypatch)
-    text_pixel = (5, main.ROW_H // 2)
+    text_pixel = (5, layout.ROW_H // 2)
 
     bar.set_alpha(255)
     assert painted_alpha(bar, *text_pixel) == 255

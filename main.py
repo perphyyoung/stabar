@@ -65,6 +65,7 @@ from PySide6.QtWidgets import (
 
 import dialogs
 import drives
+import layout
 import logging_setup
 import paths
 import single_instance
@@ -99,42 +100,17 @@ THRESHOLD_MAX = 1.00
 THRESHOLD_STEP = 0.01  # 一格 = 1%
 THRESHOLD_GAP = 0.01  # 橙色与常亮都必须比红色至少低一格(橙色与常亮之间不设约束)
 
-# --- 尺寸与屏幕边距 ---
-WINDOW_W = 248
-ROW_H = 22
-PAD = 6
-GAP = 6
-EDGE_MARGIN = 24
-
 # --- 贴边隐藏 ---
-# 收起 = **折叠**成贴在屏幕边上的一条**断线**:线只有一条,断成几段,一段表示一个盘;
-# 指针蹭到它(或第二个实例启动)再长回原样。**不画底板 / 描边** —— 线段自己是彩色的,亮暗壁纸
-# 上都看得清,少一层就少一份遮挡。
-#
-# 每段**长度固定**(只表示"这个盘在这儿"),状态**只靠颜色** —— 与展开时的进度条同源;
-# 整条线**与屏幕边平行**:贴左 / 贴右是竖的,贴上 / 贴下是横的(见 `tail_layout`)。
-# 尺寸是**固定的设备像素**,不随主界面缩放变(「调整尺寸」只管展开形态)。
-#
-# 尾巴**整块都在屏幕内**,所以鼠标总能蹭到它 —— 这满足命中规则的要求
-# (见 README 必读第 2 条:窗口得在屏幕内留下 alpha ≥ 1 的像素,否则再也点不回来)。
-TAIL_SEGMENT = 6  # 每段(每块盘)的长度
-TAIL_LINE_H = 2  # 线宽
-TAIL_DASH_GAP = 2  # 两段之间的断开间隙(断开就靠它)
-TAIL_MARGIN = 3  # 线到尾巴边缘的留白(尾巴同时是命中区:线只有 2px 粗,留点余量才好蹭)
-# 线的透明度不跟着未报警透明度一路暗下去:它是收起时唯一能点回来的东西,淡到看不见就等于
-# 窗口丢了。下限之外仍随提亮一起变亮(悬停 / 报警)。
-TAIL_MIN_ALPHA = 90  # 线的不透明度下限
-# 贴边判定的阈值:取**最近**那条边,它的"内缩量"不超过这个值就算贴上。
-# 内缩量是**带符号**的:窗口还在屏幕内为正,压出屏幕为负 —— 所以"拖出一半"这种也判得上,
-# 不必为"压边"另立一条规则(见 `snap_edge`)。
-EDGE_SNAP_PX = 8
+# 几何常量(线宽 / 每段长度 / 贴边阈值)在 `layout.py`,与 `layout.tail_layout` / `layout.snap_edge` 放一起。
+# 这里只剩"什么时候收、收到什么程度":
+TAIL_MIN_ALPHA = 90  # 断线的不透明度下限:它是收起时唯一能点回来的东西,不能淡到看不见
 EDGE_HIDE_DELAY_MS = 250  # 指针离开后隔多久才收起:没有它,光标划过边缘会来回弹
 EDGE_HIDE_DEFAULT = True  # 默认开:贴到边就收起成小尾巴
 EDGE_HIDE_KEY = "edge_hide"
 
 # --- 整窗缩放(托盘「调整尺寸」滑杆调)---
 # 存的是**系数**而不是像素:窗口高度是"盘数 × 行高"推出来的,存绝对高会跟盘数打架;而上面的
-# WINDOW_W / ROW_H / PAD / GAP 本来就是一套常量,乘同一个系数最自然。
+# layout.WINDOW_W / layout.ROW_H / layout.PAD / layout.GAP 本来就是一套常量,乘同一个系数最自然。
 UI_SCALE_DEFAULT = 1.0
 UI_SCALE_MIN = 0.6  # 再小就看不清了
 UI_SCALE_MAX = 2.0  # 再大就占满屏
@@ -187,139 +163,6 @@ COLOR_DANGER = (231, 92, 92)
 # ======================================================================
 
 
-def lerp(a: float, b: float, t: float) -> float:
-    return a + (b - a) * t
-
-
-def clamp(value: int, low: int, high: int) -> int:
-    """把 value 夹在 [low, high] 内(high 比 low 小时以 low 为准 —— 窗口比工作区还大时的兜底)。"""
-    return max(low, min(high, value))
-
-
-def snap_edge(
-    x: int, y: int, width: int, height: int, area: tuple[int, int, int, int]
-) -> str | None:
-    """窗口贴在哪条屏幕边上:取**最近**那条边,它的内缩量 ≤ `EDGE_SNAP_PX` 就算贴上,否则 None。
-
-    `area` 是**左下开区间**的矩形 (left, top, right, bottom)(Qt 的 `QRect.right()` 是闭区间,
-    调用方要先 +1 换成这个口径)。
-
-    内缩量**带符号**:窗口还在屏幕内时为正(离这条边还有多远),压出屏幕时为负(越出去多少)。
-    取的是**最小**的那个 —— 都在屏幕内时它就等于"离得最近的那条",而压出去的那条是负数、
-    自然排在最前。于是"贴住边"和"拖出去一半"是同一条规则,不必为后者再立一条。
-
-    ⚠️ **只对展开状态用**:收起成尾巴时窗口只有十几像素,判定结果没有意义(尾巴本来就贴在那条边上)。
-    贴边状态一旦定下来就保持,只有拖动结束、开关变化、缩放时才重新判定。
-    """
-    left, top, right, bottom = area
-    inset = {
-        "left": x - left,
-        "right": right - (x + width),
-        "top": y - top,
-        "bottom": bottom - (y + height),
-    }
-    edge = min(inset, key=lambda name: inset[name])
-    return edge if inset[edge] <= EDGE_SNAP_PX else None
-
-
-def tail_pos(
-    edge: str,
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-    tail_width: int,
-    tail_height: int,
-    area: tuple[int, int, int, int],
-) -> tuple[int, int]:
-    """收起成尾巴后尾巴的左上角:贴着那条边,沿边方向对齐展开时的中心。
-
-    `x/y/width/height` 传**展开时**的矩形(锚点那份):尾巴落在它的中间,展开才不会横向跳。
-    位置一律夹在工作区内 —— 窗口停在角落时,尾巴不能因为"对齐中心"而露到屏幕外(露出去就点不到了)。
-    """
-    left, top, right, bottom = area
-    center_x = clamp(x + width // 2 - tail_width // 2, left, right - tail_width)
-    center_y = clamp(y + height // 2 - tail_height // 2, top, bottom - tail_height)
-    if edge == "left":
-        return left, center_y
-    if edge == "right":
-        return right - tail_width, center_y
-    if edge == "top":
-        return center_x, top
-    return center_x, bottom - tail_height  # bottom
-
-
-def scaled_layout(scale: float, rows: int) -> tuple[int, int, int, int]:
-    """整窗缩放后的 (边距 pad, 行距 gap, 行高 row_h, 宽度 width)。
-
-    抽成纯函数是因为有两个消费方:窗口重排(`StatusBarWindow.apply_scale`)和"展开尺寸"的推算
-    (收起 / 展开动画的目标、用例断言)—— 各推一遍迟早推歪。
-    """
-    return (
-        round(PAD * scale),
-        round(GAP * scale),
-        max(1, round(ROW_H * scale)),
-        max(1, round(WINDOW_W * scale)),
-    )
-
-
-def layout_size(scale: float, rows: int) -> QSize:
-    """展开状态下整窗的尺寸(与 `apply_scale` 同一套算式,不另抄一份)。"""
-    pad, gap, row_h, width = scaled_layout(scale, rows)
-    return QSize(width, pad * 2 + row_h * rows + gap * (rows - 1))
-
-
-def tail_layout(edge: str, rows: int) -> tuple[int, int, list[tuple[int, int, int, int]]]:
-    """尾巴的尺寸与每块盘的线段矩形(设备像素,左上角为原点)—— 尾巴长什么样全在这一处。
-
-    **一条线,断成几段**:所有线段排在同一条直线上(同一个 y),段间留 `TAIL_DASH_GAP` 的空隙,
-    一段表示一个盘;每段长度固定(`TAIL_SEGMENT`),状态是颜色的事(见 `DiskBar.status_rgb`)。
-    整条线**与屏幕边平行** —— 贴左 / 贴右把矩形转 90°(x↔y、宽高互换),线就是竖的。
-
-    尺寸**不随主界面缩放变**:「调整尺寸」管的是展开形态,贴边后这个标记不该跟着变粗变长。
-    只有盘数会影响线的长度(要装得下每块盘一段)。
-
-    返回 (宽, 高, [线段矩形…]),矩形顺序与盘序一致 —— 调用方拿着直接画,不必再判断方向。
-    """
-    length = TAIL_MARGIN * 2 + rows * TAIL_SEGMENT + (rows - 1) * TAIL_DASH_GAP
-    thick = TAIL_MARGIN * 2 + TAIL_LINE_H
-    lines = [
-        # 先按"线沿 x 轴"排;竖线把矩形转 90°(x↔y、宽高互换)即可,段的长度不变
-        (
-            TAIL_MARGIN + index * (TAIL_SEGMENT + TAIL_DASH_GAP),
-            TAIL_MARGIN,
-            TAIL_SEGMENT,
-            TAIL_LINE_H,
-        )
-        for index in range(rows)
-    ]
-    if edge in ("left", "right"):
-        return thick, length, [(y, x, h, w) for x, y, w, h in lines]
-    return length, thick, lines
-
-
-def with_alpha(rgb: tuple[int, int, int], alpha: float) -> QColor:
-    """给颜色换一个 alpha。**alpha 是 0~255,不是 0~1** —— 写 0.55 会被取整成 1(几乎看不见)。"""
-    color = QColor(*rgb)
-    color.setAlpha(max(0, min(255, round(alpha))))
-    return color
-
-
-def is_lit(max_ratio: float, lit: float, danger: float) -> bool:
-    """占用率是否该常亮:到「常亮阈值」或「红色阈值」都算 —— 取两者中**更低**的那条。
-
-    红色线永远是"最迟必须亮"的兜底:就算把常亮阈值设得比它高(配置文件手写),到红线照样常亮。
-    两条线都没到就**完全不提亮**,严格按配置文件的不透明度显示(没有渐亮斜坡 —— 那会让
-    "平时隐身"变得不可预期)。
-    """
-    return max_ratio >= min(lit, danger)
-
-
-def percent_text(value: float) -> str:
-    """把 0.85 这样的值写成给人看的百分比(滑杆右侧标签、还原框里的阈值共用)。"""
-    return f"{round(value * 100)}%"
-
-
 def scale_units(scale: float) -> int:
     """缩放系数 -> 滑杆格数(一格 1%,所以格数就是百分数)。"""
     return min(
@@ -338,10 +181,10 @@ def scale_from_units(units: int) -> float:
 # 默认值一律引用上面的常量、不再抄一份:改常量时还原跟着变。
 RESETTABLE_SETTINGS = (
     ("refresh_seconds", "刷新频率", REFRESH_DEFAULT_S, lambda value: f"{value} 秒"),
-    ("warn_threshold", "橙色阈值", WARN_THRESHOLD, percent_text),
-    ("danger_threshold", "红色阈值", DANGER_THRESHOLD, percent_text),
-    ("lit_threshold", "常亮阈值", LIT_THRESHOLD, percent_text),
-    ("idle_opacity", "未报警透明度", FIRST_RUN_IDLE_OPACITY, percent_text),
+    ("warn_threshold", "橙色阈值", WARN_THRESHOLD, layout.percent_text),
+    ("danger_threshold", "红色阈值", DANGER_THRESHOLD, layout.percent_text),
+    ("lit_threshold", "常亮阈值", LIT_THRESHOLD, layout.percent_text),
+    ("idle_opacity", "未报警透明度", FIRST_RUN_IDLE_OPACITY, layout.percent_text),
     (EDGE_HIDE_KEY, "贴边隐藏", EDGE_HIDE_DEFAULT, lambda value: "开" if value else "关"),
     (
         drives.DRIVES_KEY,
@@ -401,14 +244,6 @@ def draw_outlined_text(
 # ======================================================================
 
 log = logging.getLogger(paths.APP_NAME)
-
-
-def human_size(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
-            return f"{n:.0f} {unit}" if unit in ("B", "KB", "MB") else f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} PB"
 
 
 # ======================================================================
@@ -494,7 +329,7 @@ class DiskBar(QWidget):
         self._font.setPointSizeF(9.0)
         # 让父窗口统一接收鼠标事件,拖动和悬停都更简单
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setFixedHeight(ROW_H)
+        self.setFixedHeight(layout.ROW_H)
         self._scale = UI_SCALE_DEFAULT  # 由窗口下发,见 set_scale
 
     # ---- 数据 ----
@@ -519,8 +354,8 @@ class DiskBar(QWidget):
         used, total = self._stats
         ratio = used / total * 100 if total else 0.0
         return (
-            f"{self._label}  已用 {human_size(used)} / {human_size(total)}"
-            f"  可用 {human_size(total - used)}  ({ratio:.1f}%)"
+            f"{self._label}  已用 {layout.human_size(used)} / {layout.human_size(total)}"
+            f"  可用 {layout.human_size(total - used)}  ({ratio:.1f}%)"
         )
 
     def short_text(self) -> str:
@@ -559,7 +394,7 @@ class DiskBar(QWidget):
         return COLOR_WARN if self._warned else COLOR_ACCENT
 
     def _bar_color(self, ratio: float) -> QColor:
-        return with_alpha(self._bar_rgb(ratio), self._alpha)
+        return layout.with_alpha(self._bar_rgb(ratio), self._alpha)
 
     def status_rgb(self) -> tuple[int, int, int]:
         """收起的尾巴上那条线段要的颜色(不带 alpha)。
@@ -574,7 +409,7 @@ class DiskBar(QWidget):
     def set_scale(self, scale: float) -> None:
         """整窗缩放:只需设高度,其余交给绘制变换 —— 见 `paintEvent` 开头。"""
         self._scale = scale
-        self.setFixedHeight(max(1, round(ROW_H * scale)))
+        self.setFixedHeight(max(1, round(layout.ROW_H * scale)))
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -585,9 +420,9 @@ class DiskBar(QWidget):
         # 不必去 setPointSizeF(缩小时还会触发 QFont 的"点大小必须 > 0"警告)。
         painter.scale(self._scale, self._scale)
         w, h = self.width() / self._scale, self.height() / self._scale
-        text_color = with_alpha(BASE_TEXT, self._alpha)
-        dim_color = with_alpha(BASE_DIM, self._alpha)
-        outline = with_alpha(OUTLINE_RGB, self._alpha)
+        text_color = layout.with_alpha(BASE_TEXT, self._alpha)
+        dim_color = layout.with_alpha(BASE_DIM, self._alpha)
+        outline = layout.with_alpha(OUTLINE_RGB, self._alpha)
 
         draw_outlined_text(
             painter, QRectF(0, 0, 26, h), self._label, self._font, text_color, outline
@@ -602,7 +437,7 @@ class DiskBar(QWidget):
 
         track = QPainterPath()
         track.addRoundedRect(bar_x, bar_y, bar_w, bar_h, bar_h / 2, bar_h / 2)
-        painter.fillPath(track, with_alpha(BASE_TRACK, self._alpha * TRACK_RATIO))
+        painter.fillPath(track, layout.with_alpha(BASE_TRACK, self._alpha * TRACK_RATIO))
 
         if self._stats is None:
             draw_outlined_text(
@@ -658,7 +493,7 @@ class StatusBarWindow(QWidget):
         # Qt 文档:tooltip 默认只对**活动窗口**显示,而本窗口置顶、从不被激活(真人实测:
         # 详情会时有时无甚至一直不出现)。开了这条,非活动窗口也照常弹详情。
         self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
-        self.setFixedSize(layout_size(UI_SCALE_DEFAULT, 1))  # 占位,真实尺寸由 _build_bars 定
+        self.setFixedSize(layout.layout_size(UI_SCALE_DEFAULT, 1))  # 占位,真实尺寸由 _build_bars 定
 
         self._settings = QSettings(str(paths.settings_path()), QSettings.IniFormat)
         self._drag_offset: QPoint | None = None
@@ -782,7 +617,7 @@ class StatusBarWindow(QWidget):
     def set_idle_opacity(self, value: float) -> None:
         """提交"未报警时的透明度":落盘 + 记一条 `event=idle_opacity`。
 
-        只动最暗档那一端:`_apply_level` 里 `alpha = lerp(idle, LIVE, level)`,
+        只动最暗档那一端:`_apply_level` 里 `alpha = layout.lerp(idle, LIVE, level)`,
         所以悬停 / 提亮中(level > 0)画面不受影响,松手回到最暗档才看得出差别。
 
         画面可能已经被 `preview_idle_opacity` 改过,所以**不能**拿"值没变"当跳过的理由 ——
@@ -849,7 +684,7 @@ class StatusBarWindow(QWidget):
     def _enforce_threshold_order(self) -> None:
         """只保证橙色比红色低一格(不然橙色永远轮不到);**常亮阈值不受红色约束**。
 
-        常亮阈值可以高于红色:那样红色会先触发常亮(`is_lit` 取两者中更低的那条),
+        常亮阈值可以高于红色:那样红色会先触发常亮(`layout.is_lit` 取两者中更低的那条),
         也就是"红线即常亮" —— 常亮默认值与红色相同,走的正是这条路。
         """
         if self._danger_threshold - THRESHOLD_MIN < THRESHOLD_GAP:
@@ -981,7 +816,9 @@ class StatusBarWindow(QWidget):
             self.move(int(x), int(y))
         elif screen is not None:
             area = screen.availableGeometry()
-            self.move(area.right() - self.width() - EDGE_MARGIN, area.top() + EDGE_MARGIN)
+            self.move(
+                area.right() - self.width() - layout.EDGE_MARGIN, area.top() + layout.EDGE_MARGIN
+            )
 
         if screen is not None:  # 换过显示器后别把窗口留在屏幕外
             area = screen.availableGeometry()
@@ -1091,7 +928,7 @@ class StatusBarWindow(QWidget):
         悬停走硬切(animate=False):鼠标一动就要立刻响应,不能有拖尾;
         阈值提亮保留补间,因为磁盘水位变化缓慢,直接跳变反而突兀。
         """
-        lit_by_usage = is_lit(self._max_ratio(), self._lit_threshold, self._danger_threshold)
+        lit_by_usage = layout.is_lit(self._max_ratio(), self._lit_threshold, self._danger_threshold)
         target = 1.0 if (self._hovered or lit_by_usage) else 0.0
         if target == self._target:
             return
@@ -1117,7 +954,7 @@ class StatusBarWindow(QWidget):
         连隐形命中层一起压到 alpha 0,鼠标就会穿透窗口,拖动和悬停失效。
         """
         self._level = float(value)
-        alpha = lerp(self._idle_opacity, LIVE_OPACITY, self._level) * 255
+        alpha = layout.lerp(self._idle_opacity, LIVE_OPACITY, self._level) * 255
         self._tail_alpha = alpha
         for bar in self._bars:
             bar.set_alpha(alpha)
@@ -1155,16 +992,16 @@ class StatusBarWindow(QWidget):
         没有底板也没有描边 —— 因此窗口那一层隐形矩形(见 `paintEvent`)仍是唯一的命中来源,别动它;
         线只有 2px 粗,能蹭到全靠那层矩形。
 
-        按 `tail_layout` 给的尺寸画,再让画布缩放到**当前窗口大小** —— 收起途中窗口一直在缩,
+        按 `layout.tail_layout` 给的尺寸画,再让画布缩放到**当前窗口大小** —— 收起途中窗口一直在缩,
         同一段代码顺带画出了"缩成一条"的过程;停稳时两者相等,缩放正好是 1,像素对齐。方向
         (横 / 竖)由布局给,这里没有分支。
         """
         painter.setRenderHint(QPainter.Antialiasing)
-        width, height, lines = tail_layout(self._edge or "top", len(self._bars))
+        width, height, lines = layout.tail_layout(self._edge or "top", len(self._bars))
         painter.scale(self.width() / max(1, width), self.height() / max(1, height))
         alpha = max(self._tail_alpha, TAIL_MIN_ALPHA)
         for (x, y, w, h), bar in zip(lines, self._bars, strict=False):
-            painter.fillRect(QRectF(x, y, w, h), with_alpha(bar.status_rgb(), alpha))
+            painter.fillRect(QRectF(x, y, w, h), layout.with_alpha(bar.status_rgb(), alpha))
 
     # ---- 鼠标穿透:开启后事件直接落到桌面,不能拖动、不能悬停 ----
     def set_click_through(self, enabled: bool) -> None:
@@ -1246,15 +1083,15 @@ class StatusBarWindow(QWidget):
 
     def full_size(self) -> QSize:
         """展开形态的尺寸(当前缩放下的)—— 用例与形变目标都用它,不另推一遍。"""
-        return layout_size(self._ui_scale, len(self._bars) or 1)
+        return layout.layout_size(self._ui_scale, len(self._bars) or 1)
 
     def tail_size(self, edge: str | None = None) -> QSize:
         """尾巴尺寸:**固定的设备像素**,不随主界面缩放变(那是展开形态的事)。
 
-        `edge` 决定线的方向(见 `tail_layout`),默认用当前贴着的那条边;没贴边时按横线那套算。
+        `edge` 决定线的方向(见 `layout.tail_layout`),默认用当前贴着的那条边;没贴边时按横线那套算。
         """
         rows = len(self._bars) or 1
-        width, height, _ = tail_layout(edge or self._edge or "top", rows)
+        width, height, _ = layout.tail_layout(edge or self._edge or "top", rows)
         return QSize(width, height)
 
     def set_edge_hide(self, enabled: bool) -> None:
@@ -1269,7 +1106,7 @@ class StatusBarWindow(QWidget):
             self.leave_edge()
 
     def _screen_bounds(self) -> tuple[int, int, int, int] | None:
-        """窗口所在屏幕的工作区,换成**左下开区间**口径(`snap_edge` / `tail_pos` 用这个口径)。
+        """窗口所在屏幕的工作区,换成**左下开区间**口径(`layout.snap_edge` / `layout.tail_pos` 用这个口径)。
 
         用工作区而不是整块屏幕:底边自动避开任务栏,贴上去才真的蹭得到。
         """
@@ -1306,13 +1143,13 @@ class StatusBarWindow(QWidget):
           量到的是屏幕边,判定结果就不再是用户放下的位置了);
         - 收在尾巴里时:窗口的位置是尾巴的,得先长回锚点(那才是展开位置)。
 
-        压出屏幕的那部分也算贴上(见 `snap_edge`),所以"拖出去一半松手"会被拉回边上摆正。
+        压出屏幕的那部分也算贴上(见 `layout.snap_edge`),所以"拖出去一半松手"会被拉回边上摆正。
         """
         self._expand_now(self._edge_anchor if self._edge_hidden else None)
         bounds = self._screen_bounds()
         if bounds is None:
             return
-        edge = snap_edge(self.x(), self.y(), self.width(), self.height(), bounds)
+        edge = layout.snap_edge(self.x(), self.y(), self.width(), self.height(), bounds)
         if edge is None:
             self.leave_edge(keep_position=True)  # 已经拖离屏幕边:窗口留在放下的位置
             return
@@ -1368,7 +1205,7 @@ class StatusBarWindow(QWidget):
             return
         tail = self.tail_size(self._edge)  # 方向随边:贴左/右是竖线段
         full = self.full_size()
-        target = tail_pos(
+        target = layout.tail_pos(
             self._edge,
             self._edge_anchor.x(),
             self._edge_anchor.y(),
@@ -1432,19 +1269,23 @@ class StatusBarWindow(QWidget):
             max(
                 1,
                 round(
-                    lerp(self._edge_start_size.width(), self._edge_target_size.width(), progress)
+                    layout.lerp(
+                        self._edge_start_size.width(), self._edge_target_size.width(), progress
+                    )
                 ),
             ),
             max(
                 1,
                 round(
-                    lerp(self._edge_start_size.height(), self._edge_target_size.height(), progress)
+                    layout.lerp(
+                        self._edge_start_size.height(), self._edge_target_size.height(), progress
+                    )
                 ),
             ),
         )
         self.move(
-            round(lerp(self._edge_start.x(), self._edge_target.x(), progress)),
-            round(lerp(self._edge_start.y(), self._edge_target.y(), progress)),
+            round(layout.lerp(self._edge_start.x(), self._edge_target.x(), progress)),
+            round(layout.lerp(self._edge_start.y(), self._edge_target.y(), progress)),
         )
 
     # ---- 整窗缩放(托盘「调整尺寸」滑杆)----
@@ -1490,8 +1331,8 @@ class StatusBarWindow(QWidget):
 
     def apply_scale(self, scale: float) -> None:
         """按系数重排整窗:窗口尺寸、每个盘条的位置与高度、绘制变换都乘它。"""
-        pad, gap, row_h, width = scaled_layout(scale, len(self._bars) or 1)
-        self.setFixedSize(layout_size(scale, len(self._bars) or 1))
+        pad, gap, row_h, width = layout.scaled_layout(scale, len(self._bars) or 1)
+        self.setFixedSize(layout.layout_size(scale, len(self._bars) or 1))
         if self._edge is not None:
             # 尺寸变了:齐平位置与尾巴大小都要重算。`snap_to_edge` 会先长回展开形态再判 ——
             # 用户正在调大小,看得见才好对齐(贴边的标记只有十几像素,量不出贴哪条边)。
@@ -1672,7 +1513,7 @@ class TrayIcon(QSystemTrayIcon):
         self._opacity_slider.blockSignals(True)  # 对齐不该反过来触发预览
         self._opacity_slider.setValue(opacity_units(self._window.idle_opacity))
         self._opacity_slider.blockSignals(False)
-        self._opacity_value.setText(percent_text(self._window.idle_opacity))
+        self._opacity_value.setText(layout.percent_text(self._window.idle_opacity))
 
         # 步进器同理:对齐到生效值,且不反过来触发预览
         self._refresh_spin.blockSignals(True)
@@ -1689,7 +1530,7 @@ class TrayIcon(QSystemTrayIcon):
         self._scale_slider.blockSignals(True)
         self._scale_slider.setValue(scale_units(self._window.ui_scale))
         self._scale_slider.blockSignals(False)
-        self._scale_value.setText(percent_text(self._window.ui_scale))
+        self._scale_value.setText(layout.percent_text(self._window.ui_scale))
 
         self._autostart.blockSignals(True)  # 同上,避免回环
         self._autostart.setChecked(is_autostart_enabled())
@@ -1803,7 +1644,7 @@ class TrayIcon(QSystemTrayIcon):
         self._opacity_slider.setRange(1, OPACITY_STEPS)
         self._opacity_slider.setValue(opacity_units(window.idle_opacity))
         self._opacity_slider.setMinimumWidth(SLIDER_WIDTH)
-        self._opacity_value = QLabel(percent_text(window.idle_opacity), self._menu)
+        self._opacity_value = QLabel(layout.percent_text(window.idle_opacity), self._menu)
         self._opacity_value.setMinimumWidth(36)
         # 文字也贴右:否则数字左对齐,看着比步进器的右边缘短一截
         self._opacity_value.setAlignment(
@@ -1867,7 +1708,7 @@ class TrayIcon(QSystemTrayIcon):
         self._scale_slider.setValue(scale_units(window.ui_scale))
         self._scale_slider.setMinimumWidth(SLIDER_WIDTH)
         self._scale_slider.setToolTip("小组件整体大小(60% ~ 200%)")
-        self._scale_value = QLabel(percent_text(window.ui_scale), self._menu)
+        self._scale_value = QLabel(layout.percent_text(window.ui_scale), self._menu)
         self._scale_value.setMinimumWidth(40)
         self._scale_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._add_row(
@@ -1881,7 +1722,7 @@ class TrayIcon(QSystemTrayIcon):
     def _on_scale_changed(self, units: int) -> None:
         """拖动过程中:只预览,不落盘(拖一次会发几十个信号)。"""
         scale = scale_from_units(units)
-        self._scale_value.setText(percent_text(scale))
+        self._scale_value.setText(layout.percent_text(scale))
         self._window.preview_ui_scale(scale)
 
     def _commit_scale(self) -> None:
@@ -1993,7 +1834,7 @@ class TrayIcon(QSystemTrayIcon):
     def _on_opacity_changed(self, step: int) -> None:
         """拖动过程中:只预览,不落盘(拖一次会发几十个信号)。"""
         value = opacity_from_step(step)
-        self._opacity_value.setText(percent_text(value))
+        self._opacity_value.setText(layout.percent_text(value))
         self._window.preview_idle_opacity(value)
 
     def _commit_opacity(self) -> None:

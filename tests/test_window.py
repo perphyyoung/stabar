@@ -14,6 +14,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import drives
+import layout
 import main
 import paths
 
@@ -155,7 +156,7 @@ def test_ui_scale_resizes_window_bars_and_persists(window, tmp_path) -> None:
 
     assert window.size().width() == round(base.width() * 1.5)
     assert abs(window.size().height() - round(base.height() * 1.5)) <= 2  # 各段分别取整
-    assert window._bars[0].height() == round(main.ROW_H * 1.5)
+    assert window._bars[0].height() == round(layout.ROW_H * 1.5)
     assert "ui_scale=1.5" in (tmp_path / paths.SETTINGS_NAME).read_text(encoding="utf-8")
     # 与窗口位置同理:它算几何不算配置,所以「还原配置」不管它
     assert "ui_scale" not in {key for key, *_ in main.RESETTABLE_SETTINGS}
@@ -186,7 +187,7 @@ def test_drive_set_follows_the_detector(window, monkeypatch) -> None:
     window.refresh()
 
     assert [bar.path for bar in window._bars] == ["C:/", "D:/", "F:/"]
-    assert window.full_size() == main.layout_size(window.ui_scale, 3)
+    assert window.full_size() == layout.layout_size(window.ui_scale, 3)
 
 
 def test_drives_config_limits_what_is_shown(
@@ -250,7 +251,7 @@ def test_edge_hide_snaps_collapses_to_a_tail_and_grows_back(window, qtbot) -> No
     """
     area = main.QApplication.primaryScreen().availableGeometry()
     window.show()
-    window.move(area.left() + main.EDGE_SNAP_PX - 1, area.top() + 120)  # 离左边一格以内
+    window.move(area.left() + layout.EDGE_SNAP_PX - 1, area.top() + 120)  # 离左边一格以内
     window.set_edge_hide(True)
 
     assert window.edge == "left"
@@ -293,7 +294,7 @@ def test_edge_hide_grabs_a_half_off_screen_drag(window, qtbot) -> None:
 def test_tail_is_taller_sideways_and_flatter_top_bottom(window, qtbot) -> None:
     """线段朝向的可见后果:贴左/右时尾巴是**竖**的(高 > 宽),贴上/下时是横的(宽 > 高)。
 
-    方向本身由 `main.tail_layout` 决定(第 1 层钉着),这里钉的是窗口真的按那条边取对了尺寸。
+    方向本身由 `layout.tail_layout` 决定(第 1 层钉着),这里钉的是窗口真的按那条边取对了尺寸。
     """
     area = main.QApplication.primaryScreen().availableGeometry()
     window.show()
@@ -326,7 +327,7 @@ def test_tail_size_is_fixed_and_ignores_the_ui_scale(window, qtbot) -> None:
     window.set_ui_scale(main.UI_SCALE_MIN)
     assert window.tail_size() == before
     # 展开形态仍然跟着缩放走(它才是"调整尺寸"的作用对象)
-    assert window.full_size().width() == round(main.WINDOW_W * main.UI_SCALE_MIN)
+    assert window.full_size().width() == round(layout.WINDOW_W * main.UI_SCALE_MIN)
 
 
 def test_committing_ui_scale_re_arms_the_collapse(window, qtbot) -> None:

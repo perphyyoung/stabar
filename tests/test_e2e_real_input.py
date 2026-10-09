@@ -68,6 +68,7 @@ from e2e_support import (
     work_area,
 )
 
+import layout
 import logging_setup
 import main
 import paths
@@ -186,7 +187,7 @@ def app(tmp_path):
     启动后立刻断言窗口真落在那里(对不上说明 ini 没被用上)。
     """
     area_left, area_top, _, _ = work_area()
-    seed_x, seed_y = area_left + main.EDGE_MARGIN, area_top + main.EDGE_MARGIN
+    seed_x, seed_y = area_left + layout.EDGE_MARGIN, area_top + layout.EDGE_MARGIN
     ini = f"[General]\npos_x={seed_x}\npos_y={seed_y}\ndrives={DRIVES_INI}\n"
     with launched(tmp_path, ini) as running:
         left, top, _, _ = rect_of(running.hwnd)
@@ -326,8 +327,8 @@ def test_real_tray_menu_hides_window(app) -> None:
 
 
 def _edge_tail_size(edge: str = "left") -> tuple[int, int]:
-    """尾巴的尺寸(ini 里没写 ui_scale,所以就是基准像素);方向与段数随边,见 `main.tail_layout`。"""
-    width, height, _ = main.tail_layout(edge, len(DRIVES_INI.split(",")))
+    """尾巴的尺寸(ini 里没写 ui_scale,所以就是基准像素);方向与段数随边,见 `layout.tail_layout`。"""
+    width, height, _ = layout.tail_layout(edge, len(DRIVES_INI.split(",")))
     return width, height
 
 
@@ -388,7 +389,7 @@ def test_edge_hide_pulls_back_a_half_off_screen_drag(tmp_path) -> None:
     """
     area_left, area_top, area_right, _ = work_area()
     middle = (area_left + area_right) // 2
-    half = main.WINDOW_W // 2
+    half = layout.WINDOW_W // 2
     ini = (
         f"[General]\npos_x={middle}\npos_y={area_top + 200}\nedge_hide=true\ndrives={DRIVES_INI}\n"
     )
@@ -441,7 +442,7 @@ def test_edge_hide_drag_out_from_the_tail_stays_where_dropped(tmp_path) -> None:
         time.sleep(0.6)  # 等被测进程处理完松开
 
         left, top, right, bottom = geometry()
-        assert left > edge + main.EDGE_SNAP_PX, f"松手后被拽回屏幕边上了:left={left}"
+        assert left > edge + layout.EDGE_SNAP_PX, f"松手后被拽回屏幕边上了:left={left}"
         assert (right - left, bottom - top) != _edge_tail_size(), "拖出去之后又被收起成尾巴了"
         assert (
             abs(left - (edge + drop_dx)) <= 4 and abs(top - (area_top + anchor_y + drop_dy)) <= 4
