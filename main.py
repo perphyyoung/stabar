@@ -39,12 +39,8 @@ from PySide6.QtGui import (
     QAction,
     QColor,
     QCursor,
-    QFont,
-    QFontMetricsF,
     QIcon,
     QPainter,
-    QPainterPath,
-    QPen,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -64,6 +60,7 @@ from PySide6.QtWidgets import (
 )
 
 import dialogs
+import diskbar
 import drives
 import layout
 import logging_setup
@@ -111,7 +108,6 @@ EDGE_HIDE_KEY = "edge_hide"
 # --- 整窗缩放(托盘「调整尺寸」滑杆调)---
 # 存的是**系数**而不是像素:窗口高度是"盘数 × 行高"推出来的,存绝对高会跟盘数打架;而上面的
 # layout.WINDOW_W / layout.ROW_H / layout.PAD / layout.GAP 本来就是一套常量,乘同一个系数最自然。
-UI_SCALE_DEFAULT = 1.0
 UI_SCALE_MIN = 0.6  # 再小就看不清了
 UI_SCALE_MAX = 2.0  # 再大就占满屏
 SCALE_UNIT = 0.01  # 滑杆一格 = 1%
@@ -139,24 +135,10 @@ THRESHOLD_ROWS = (
 # 拖动也只能精确按住某个笔画。保留一层 alpha = 1 的隐形底板即可修复。
 HIT_AREA_ALPHA = 1
 
-# --- 文字描边:保证在浅色壁纸下也读得清 ---
-OUTLINE_RGB = (12, 12, 14)
-OUTLINE_WIDTH = 2.0  # 描边粗细(像素)
-TRACK_RATIO = 0.15  # 进度条底槽不透明度 = 前景不透明度 × 该系数
-
 # --- 持久化 ---
 # 只在配置文件里还没有 idle_opacity 这个键时生效(首次运行)。程序启动会把生效值回写,
 # 所以之后改这里不会有任何反应 —— 要调不透明度请直接改配置文件。
 FIRST_RUN_IDLE_OPACITY = 0.30
-
-# --- 色相 ---
-BASE_TEXT = (238, 238, 242)
-BASE_DIM = (196, 196, 204)
-BASE_TRACK = (255, 255, 255)
-COLOR_ACCENT = (78, 154, 241)
-COLOR_WARN = (233, 176, 78)
-COLOR_DANGER = (231, 92, 92)
-
 
 # ======================================================================
 # 小工具
@@ -210,30 +192,6 @@ def opacity_from_step(step: int) -> float:
     写进配置文件就成了难看的 `idle_opacity=0.7000000000000001`。
     """
     return step / OPACITY_STEPS
-
-
-def draw_outlined_text(
-    painter: QPainter,
-    rect: QRectF,
-    text: str,
-    font: QFont,
-    fill: QColor,
-    outline: QColor,
-    *,
-    right_aligned: bool = False,
-) -> None:
-    """垂直居中画一行带暗色描边的文字(描边让文字在任何壁纸上都可读)。"""
-    metrics = QFontMetricsF(font)
-    width = metrics.horizontalAdvance(text)
-    x = rect.right() - width if right_aligned else rect.left()
-    y = rect.center().y() + (metrics.ascent() - metrics.descent()) / 2
-
-    path = QPainterPath()
-    path.addText(x, y, font, text)
-    pen = QPen(outline)
-    pen.setWidthF(OUTLINE_WIDTH)
-    painter.strokePath(path, pen)
-    painter.fillPath(path, fill)
 
 
 # ======================================================================
@@ -306,181 +264,6 @@ def make_tray_icon() -> QIcon:
     return icon
 
 
-class DiskBar(QWidget):
-    """单行:盘符 + 占用进度条 + 百分比。不透明度由窗口统一下发。"""
-
-    def __init__(
-        self,
-        path: str,
-        parent: QWidget | None = None,
-        warn: float = WARN_THRESHOLD,
-        danger: float = DANGER_THRESHOLD,
-    ) -> None:
-        super().__init__(parent)
-        self._path = path
-        self._label = path[0] + ":"
-        self._stats = drives.read_disk(path)
-        self._alpha = 255.0
-        self._warned = False  # 警告色滞回标记
-        # 两条警戒线可配(托盘菜单改),所以存在实例上;默认值就是常量的首次运行值
-        self._warn = warn
-        self._danger = danger
-        self._font = QFont(self.font())
-        self._font.setPointSizeF(9.0)
-        # 让父窗口统一接收鼠标事件,拖动和悬停都更简单
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.setFixedHeight(layout.ROW_H)
-        self._scale = UI_SCALE_DEFAULT  # 由窗口下发,见 set_scale
-
-    # ---- 数据 ----
-    @property
-    def path(self) -> str:
-        """本行盯着的盘符(形如 "C:/")—— 盘集变化时靠它比对。"""
-        return self._path
-
-    def reload(self) -> None:
-        self._stats = drives.read_disk(self._path)
-        self.update()
-
-    def ratio(self) -> float | None:
-        if self._stats is None:
-            return None
-        used, total = self._stats
-        return used / total if total else 0.0
-
-    def detail_text(self) -> str:
-        if self._stats is None:
-            return f"{self._label}  不可用"
-        used, total = self._stats
-        ratio = used / total * 100 if total else 0.0
-        return (
-            f"{self._label}  已用 {layout.human_size(used)} / {layout.human_size(total)}"
-            f"  可用 {layout.human_size(total - used)}  ({ratio:.1f}%)"
-        )
-
-    def short_text(self) -> str:
-        """同一行的**紧凑**写法:盘符 + 占比 —— 给托盘用(那里的提示有长度上限)。"""
-        if self._stats is None:
-            return f"{self._label} 不可用"
-        return f"{self._label} {self.percent_label()}"
-
-    # ---- 观感 ----
-    def set_alpha(self, alpha: float) -> None:
-        """前景不透明度(0~255),文字与进度条一起变。"""
-        self._alpha = alpha
-        self.update()
-
-    def percent_label(self) -> str:
-        """画在右侧的占用率文字:**带 1 位小数**。
-
-        单独抽出来是为了能直接断言这一处格式(画到像素上去验证小数点不现实)。
-        """
-        used, total = self._stats or (0, 0)
-        return f"{used / total * 100:.1f}%" if total else "0.0%"
-
-    def set_thresholds(self, warn: float, danger: float) -> None:
-        """更新两条警戒线并重绘(阈值可配,所以不能再直接读模块常量)。"""
-        self._warn = warn
-        self._danger = danger
-        self.update()
-
-    def _bar_rgb(self, ratio: float) -> tuple[int, int, int]:
-        """状态色(含滞回):到红色线变红,过橙色线变橙,否则主色。进度条与尾巴共用这一处判定。"""
-        if ratio >= self._danger:
-            self._warned = True
-            return COLOR_DANGER
-        floor = self._warn - COLOR_HYSTERESIS if self._warned else self._warn
-        self._warned = ratio >= floor
-        return COLOR_WARN if self._warned else COLOR_ACCENT
-
-    def _bar_color(self, ratio: float) -> QColor:
-        return layout.with_alpha(self._bar_rgb(ratio), self._alpha)
-
-    def status_rgb(self) -> tuple[int, int, int]:
-        """收起的尾巴上那条线段要的颜色(不带 alpha)。
-
-        与进度条同源(`_bar_rgb`,含滞回),所以收起来之后颜色不会跟展开时对不上;长度不由它决定
-        —— 线段长度是固定的,状态只靠颜色。盘不可用时给暗色(它不代表任何档位)。
-        透明度由尾巴自己定(它比进度条更需要看得见)。
-        """
-        ratio = self.ratio()
-        return BASE_DIM if ratio is None else self._bar_rgb(ratio)
-
-    def set_scale(self, scale: float) -> None:
-        """整窗缩放:只需设高度,其余交给绘制变换 —— 见 `paintEvent` 开头。"""
-        self._scale = scale
-        self.setFixedHeight(max(1, round(layout.ROW_H * scale)))
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        # 绘制代码一律按**基准像素**写(26 / 32 / 8 那些),缩放由画布变换完成 —— 这样加一个
-        # 像素常量不必再记得"要不要乘系数",也不会漏。字号同理:9pt 经变换就是 9·s 的效果,
-        # 不必去 setPointSizeF(缩小时还会触发 QFont 的"点大小必须 > 0"警告)。
-        painter.scale(self._scale, self._scale)
-        w, h = self.width() / self._scale, self.height() / self._scale
-        text_color = layout.with_alpha(BASE_TEXT, self._alpha)
-        dim_color = layout.with_alpha(BASE_DIM, self._alpha)
-        outline = layout.with_alpha(OUTLINE_RGB, self._alpha)
-
-        draw_outlined_text(
-            painter, QRectF(0, 0, 26, h), self._label, self._font, text_color, outline
-        )
-
-        # 列宽按"100.0%"量出来:写死会在换字体或高 DPI 下把小数点挤掉
-        percent_w = QFontMetricsF(self._font).horizontalAdvance("100.0%") + 2
-        bar_x = 32
-        bar_w = max(60, w - bar_x - percent_w - 8)
-        bar_h = 8
-        bar_y = (h - bar_h) / 2
-
-        track = QPainterPath()
-        track.addRoundedRect(bar_x, bar_y, bar_w, bar_h, bar_h / 2, bar_h / 2)
-        painter.fillPath(track, layout.with_alpha(BASE_TRACK, self._alpha * TRACK_RATIO))
-
-        if self._stats is None:
-            draw_outlined_text(
-                painter,
-                QRectF(bar_x, 0, w - bar_x, h),
-                "不可用",
-                self._font,
-                dim_color,
-                outline,
-            )
-            return
-
-        used, total = self._stats
-        ratio = used / total if total else 0.0
-
-        fill_w = bar_w * min(ratio, 1.0)
-        if fill_w > 0:
-            fill = QPainterPath()
-            fill.addRoundedRect(bar_x, bar_y, max(fill_w, bar_h), bar_h, bar_h / 2, bar_h / 2)
-            painter.fillPath(fill, self._bar_color(ratio))
-
-        draw_outlined_text(
-            painter,
-            QRectF(w - percent_w, 0, percent_w, h),
-            self.percent_label(),
-            self._font,
-            dim_color,
-            outline,
-            right_aligned=True,
-        )
-
-
-def summary_text(bars: list[DiskBar], *, compact: bool = False) -> str:
-    """悬停提示的文字 —— **只有这一处**:完整版给主界面,紧凑版给托盘。
-
-    托盘的提示有平台上限(见 `TRAY_TIP_MAX`),完整明细会被 Windows 从中间截掉;主界面的
-    tooltip 没有这个限制,所以两种长度各取所需,而文字始终由这里产出。
-    """
-    if compact:
-        return "  ".join(bar.short_text() for bar in bars)
-    return "\n".join(bar.detail_text() for bar in bars)
-
-
 class StatusBarWindow(QWidget):
     """无标题条、无背景的置顶窗口,负责提亮 / 还原与位置持久化。"""
 
@@ -493,7 +276,9 @@ class StatusBarWindow(QWidget):
         # Qt 文档:tooltip 默认只对**活动窗口**显示,而本窗口置顶、从不被激活(真人实测:
         # 详情会时有时无甚至一直不出现)。开了这条,非活动窗口也照常弹详情。
         self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
-        self.setFixedSize(layout.layout_size(UI_SCALE_DEFAULT, 1))  # 占位,真实尺寸由 _build_bars 定
+        self.setFixedSize(
+            layout.layout_size(layout.UI_SCALE_DEFAULT, 1)
+        )  # 占位,真实尺寸由 _build_bars 定
 
         self._settings = QSettings(str(paths.settings_path()), QSettings.IniFormat)
         self._drag_offset: QPoint | None = None
@@ -564,7 +349,7 @@ class StatusBarWindow(QWidget):
             self._danger_threshold,
         )
 
-        self._bars: list[DiskBar] = []
+        self._bars: list[diskbar.DiskBar] = []
         self._refresh_drives(reason="startup", force=True)
 
         self._anim = QVariantAnimation(self)
@@ -867,7 +652,9 @@ class StatusBarWindow(QWidget):
             bar.deleteLater()
         self._bars = []
         for path in paths:
-            bar = DiskBar(path, self, self._warn_threshold, self._danger_threshold)
+            bar = diskbar.DiskBar(
+                path, self, warn=self._warn_threshold, danger=self._danger_threshold
+            )
             # 详情文字挂在**窗口**上,而盘条铺满整块区域、自己又不处理 tooltip —— 不给它设这个,
             # 悬停在盘条上时那条 tooltip 就归盘条(它没有文字 → 不弹),表现为"详情时有时无"。
             # 让盘条不接收鼠标事件,悬停统一归窗口,整块区域都能弹(不必逐个给子控件设 tooltip)。
@@ -915,7 +702,7 @@ class StatusBarWindow(QWidget):
 
     def summary(self, *, compact: bool = False) -> str:
         """状态文字(悬停提示):完整版挂在窗口上,紧凑版发给托盘 —— 出处只有 `summary_text`。"""
-        return summary_text(self._bars, compact=compact)
+        return diskbar.summary_text(self._bars, compact=compact)
 
     def _max_ratio(self) -> float:
         ratios = [r for bar in self._bars if (r := bar.ratio()) is not None]
@@ -1292,10 +1079,10 @@ class StatusBarWindow(QWidget):
     def _read_ui_scale(self) -> float:
         """读记住的缩放系数。非法值退回默认,越界夹取并留痕(与其它配置项一套做法)。"""
         try:
-            value = float(self._settings.value("ui_scale", UI_SCALE_DEFAULT))
+            value = float(self._settings.value("ui_scale", layout.UI_SCALE_DEFAULT))
         except (TypeError, ValueError):
-            log.warning("event=config_invalid key=ui_scale fallback=%s", UI_SCALE_DEFAULT)
-            return UI_SCALE_DEFAULT
+            log.warning("event=config_invalid key=ui_scale fallback=%s", layout.UI_SCALE_DEFAULT)
+            return layout.UI_SCALE_DEFAULT
         clamped = min(UI_SCALE_MAX, max(UI_SCALE_MIN, round(value, 2)))
         if clamped != value:
             log.warning("event=config_clamped key=ui_scale value=%s used=%s", value, clamped)
@@ -1746,7 +1533,10 @@ class TrayIcon(QSystemTrayIcon):
         # 先收起菜单再弹模态框:popup 会请求键盘 / 鼠标抓取(离屏平台会打
         # "This plugin does not support grabbing the keyboard"),收起来最稳
         self._menu.close()
-        if dialogs.ResetDialog(rows, QColor(*COLOR_DANGER)).exec() != QDialog.DialogCode.Accepted:
+        if (
+            dialogs.ResetDialog(rows, QColor(*diskbar.COLOR_DANGER)).exec()
+            != QDialog.DialogCode.Accepted
+        ):
             log.debug("event=config_reset_cancelled")
             return
         if not rows:

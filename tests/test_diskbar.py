@@ -4,21 +4,23 @@ import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage
 
+import diskbar
 import drives
 import layout
 import main
 
 
-def make_bar(monkeypatch, used: int = 500, total: int = 1000) -> main.DiskBar:
+def make_bar(monkeypatch, used: int = 500, total: int = 1000) -> diskbar.DiskBar:
     monkeypatch.setattr(drives, "read_disk", lambda path: (used, total))
-    bar = main.DiskBar("C:/")
+    # 警戒线由窗口传进来(本模块不持有默认值),这里用 main 的首次运行值
+    bar = diskbar.DiskBar("C:/", warn=main.WARN_THRESHOLD, danger=main.DANGER_THRESHOLD)
     # 关键:不加这个属性,render() 会先铺一层不透明底色,量出来的 alpha 恒为 255
     bar.setAttribute(Qt.WA_TranslucentBackground)
     bar.resize(240, layout.ROW_H)
     return bar
 
 
-def painted_alpha(bar: main.DiskBar, x: int, y: int) -> int:
+def painted_alpha(bar: diskbar.DiskBar, x: int, y: int) -> int:
     """把 bar 画进一张自己掌控 alpha 的透明图,取指定像素的 alpha。"""
     image = QImage(240, layout.ROW_H, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(Qt.transparent)
@@ -28,7 +30,8 @@ def painted_alpha(bar: main.DiskBar, x: int, y: int) -> int:
 
 def test_ratio_none_when_drive_missing(monkeypatch, qapp) -> None:
     monkeypatch.setattr(drives, "read_disk", lambda path: None)
-    assert main.DiskBar("Z:/").ratio() is None
+    missing = diskbar.DiskBar("Z:/", warn=main.WARN_THRESHOLD, danger=main.DANGER_THRESHOLD)
+    assert missing.ratio() is None
 
 
 def test_ratio_and_detail_text(monkeypatch, qapp) -> None:
@@ -41,14 +44,14 @@ def test_ratio_and_detail_text(monkeypatch, qapp) -> None:
 def test_bar_color_hysteresis(monkeypatch, qapp) -> None:
     """卡在警告线上时颜色不该来回闪:跌回阈值下方一点点仍保持警示色。"""
     bar = make_bar(monkeypatch)
-    warn = QColor(*main.COLOR_WARN).name()
-    accent = QColor(*main.COLOR_ACCENT).name()
-    danger = QColor(*main.COLOR_DANGER).name()
+    warn = QColor(*diskbar.COLOR_WARN).name()
+    accent = QColor(*diskbar.COLOR_ACCENT).name()
+    danger = QColor(*diskbar.COLOR_DANGER).name()
 
     assert bar._bar_color(main.WARN_THRESHOLD).name() == warn
-    slightly_below = main.WARN_THRESHOLD - main.COLOR_HYSTERESIS / 2
+    slightly_below = main.WARN_THRESHOLD - diskbar.COLOR_HYSTERESIS / 2
     assert bar._bar_color(slightly_below).name() == warn
-    clearly_below = main.WARN_THRESHOLD - main.COLOR_HYSTERESIS * 2
+    clearly_below = main.WARN_THRESHOLD - diskbar.COLOR_HYSTERESIS * 2
     assert bar._bar_color(clearly_below).name() == accent
     assert bar._bar_color(main.DANGER_THRESHOLD).name() == danger
 
@@ -70,9 +73,9 @@ def test_alpha_controls_painted_opacity(monkeypatch, qapp) -> None:
 def test_bar_color_follows_instance_thresholds(monkeypatch, qapp) -> None:
     """警戒线可配:把橙线压到 50%、红线压到 60%,同一个占用率的颜色就跟着变。"""
     bar = make_bar(monkeypatch, used=550, total=1000)
-    accent = QColor(*main.COLOR_ACCENT).name()
-    warn = QColor(*main.COLOR_WARN).name()
-    danger = QColor(*main.COLOR_DANGER).name()
+    accent = QColor(*diskbar.COLOR_ACCENT).name()
+    warn = QColor(*diskbar.COLOR_WARN).name()
+    danger = QColor(*diskbar.COLOR_DANGER).name()
 
     assert bar._bar_color(0.55).name() == accent  # 默认 0.85/0.90 下还不到橙线
     bar.set_thresholds(0.50, 0.60)
@@ -87,4 +90,5 @@ def test_percent_label_has_one_decimal(monkeypatch, qapp) -> None:
     assert make_bar(monkeypatch, used=1000, total=1000).percent_label() == "100.0%"
 
     monkeypatch.setattr(drives, "read_disk", lambda path: None)
-    assert main.DiskBar("Z:/").percent_label() == "0.0%"  # 读不到数据也不能崩
+    broken = diskbar.DiskBar("Z:/", warn=main.WARN_THRESHOLD, danger=main.DANGER_THRESHOLD)
+    assert broken.percent_label() == "0.0%"  # 读不到数据也不能崩

@@ -17,6 +17,7 @@ dependencies = [
 py-modules = [
     "main",
     "dialogs",
+    "diskbar",
     "drives",
     "layout",
     "logging_setup",

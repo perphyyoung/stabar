@@ -13,6 +13,7 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor
 
 # --- 尺寸与屏幕边距 ---
+UI_SCALE_DEFAULT = 1.0  # 整窗缩放的首次运行值(系数,不是像素)
 WINDOW_W = 248
 ROW_H = 22
 PAD = 6

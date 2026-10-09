@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QKeyEvent, QWheelEvent
 from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton
 
 import dialogs
+import diskbar
 import main
 import paths
 
@@ -247,7 +248,7 @@ def test_reset_dialog_draws_its_own_title_bar() -> None:
     原生标题栏整行都是 Windows 按主题画的,Qt 没有设置对齐的接口 —— 想让标题居中只能自己画
     (开发经验第 38 条)。去掉原生框架的代价就是拖动也得自己接,所以这条一并钉住。
     """
-    dialog = dialogs.ResetDialog([("橙色阈值", "80%", "85%")], QColor(*main.COLOR_DANGER))
+    dialog = dialogs.ResetDialog([("橙色阈值", "80%", "85%")], QColor(*diskbar.COLOR_DANGER))
     dialog.show()
     try:
         assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint  # 原生标题栏已关掉

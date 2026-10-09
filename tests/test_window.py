@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+import diskbar
 import drives
 import layout
 import main
@@ -40,8 +41,8 @@ def test_hover_details_cover_the_whole_window(window) -> None:
 def test_hover_text_has_one_source_and_two_lengths(window) -> None:
     """悬停提示只有一处实现:窗口用完整明细,托盘用紧凑版(平台只给 128 个字符)。"""
     assert window.toolTip() == window.summary()  # 窗口上挂的就是完整版
-    assert window.summary() == main.summary_text(window._bars)  # 出处只有 summary_text
-    assert window.summary(compact=True) == main.summary_text(window._bars, compact=True)
+    assert window.summary() == diskbar.summary_text(window._bars)  # 出处只有 summary_text
+    assert window.summary(compact=True) == diskbar.summary_text(window._bars, compact=True)
 
     full, compact = window.summary(), window.summary(compact=True)
     assert "\n" in full and "\n" not in compact  # 完整版多行、紧凑版一行
@@ -56,7 +57,7 @@ def test_brightness_only_from_hover_or_thresholds(window, monkeypatch) -> None:
     monkeypatch.setattr(drives, "read_disk", lambda path: (860, 1000))  # 86%:过橙线、未到常亮
     window.refresh()
     assert window._target == 0.0  # 橙线不提亮
-    assert bar._bar_color(0.86).name() == QColor(*main.COLOR_WARN).name()  # 但它变橙了
+    assert bar._bar_color(0.86).name() == QColor(*diskbar.COLOR_WARN).name()  # 但它变橙了
 
     monkeypatch.setattr(drives, "read_disk", lambda path: (910, 1000))  # 91%:过红线
     window.refresh()
@@ -67,7 +68,7 @@ def test_brightness_only_from_hover_or_thresholds(window, monkeypatch) -> None:
     monkeypatch.setattr(drives, "read_disk", lambda path: (600, 1000))
     window.refresh()
     assert window._target == 1.0
-    assert bar._bar_color(0.60).name() == QColor(*main.COLOR_ACCENT).name()
+    assert bar._bar_color(0.60).name() == QColor(*diskbar.COLOR_ACCENT).name()
 
 
 def test_threshold_config_clamped_and_order_enforced(window, events) -> None:
