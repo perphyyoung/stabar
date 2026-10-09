@@ -5,13 +5,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import main
+import paths
 
 
 def test_settings_path_dev_stays_in_project(monkeypatch) -> None:
     """开发时留在项目目录,方便直接手改。"""
     monkeypatch.delattr(sys, "frozen", raising=False)
-    expected = Path(main.__file__).with_name(main.SETTINGS_NAME)
-    assert main.settings_path() == expected
+    expected = Path(main.__file__).with_name(paths.SETTINGS_NAME)
+    assert paths.settings_path() == expected
 
 
 def test_settings_path_frozen_uses_user_config(monkeypatch, tmp_path) -> None:
@@ -25,16 +26,16 @@ def test_settings_path_frozen_uses_user_config(monkeypatch, tmp_path) -> None:
         writableLocation=lambda kind: str(tmp_path),
     )
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(main, "QStandardPaths", fake_paths)
-    assert main.settings_path() == tmp_path / main.SETTINGS_NAME
+    monkeypatch.setattr(paths, "QStandardPaths", fake_paths)
+    assert paths.settings_path() == tmp_path / paths.SETTINGS_NAME
 
 
 def test_icon_path_dev_reads_project_file(monkeypatch) -> None:
     monkeypatch.delattr(sys, "_MEIPASS", raising=False)
-    assert main.icon_path() == Path(main.__file__).with_name(main.ICON_NAME)
+    assert paths.icon_path() == Path(main.__file__).with_name(paths.ICON_NAME)
 
 
 def test_icon_path_frozen_reads_from_bundle(monkeypatch, tmp_path) -> None:
     """打包后图标从 PyInstaller 的解包目录读(spec 的 datas 负责把它带进去)。"""
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
-    assert main.icon_path() == tmp_path / main.ICON_NAME
+    assert paths.icon_path() == tmp_path / paths.ICON_NAME

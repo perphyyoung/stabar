@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QPushButton
 
 import dialogs
 import main
+import paths
 
 
 @pytest.fixture
@@ -21,7 +22,7 @@ def tray(window) -> main.TrayIcon:
 
 def saved_line(tmp_path, key: str) -> str:
     """配置文件里以 `key` 开头的那一行(真读文件,不读 QSettings 的缓存)。"""
-    text = (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+    text = (tmp_path / paths.SETTINGS_NAME).read_text(encoding="utf-8")
     return next(line for line in text.splitlines() if line.startswith(key))
 
 
@@ -168,13 +169,13 @@ def test_reset_keeps_position_and_restores_others(window, tmp_path) -> None:
     window.move(321, 123)
     window._save_position()
     window._settings.sync()  # 位置是攒着写的(靠进程退出冲刷),这里要真落盘才能查
-    assert "pos_x=321" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+    assert "pos_x=321" in (tmp_path / paths.SETTINGS_NAME).read_text(encoding="utf-8")
 
     changed = window.reset_settings()
 
     assert changed == ["未报警透明度"]
     assert window.idle_opacity == pytest.approx(main.FIRST_RUN_IDLE_OPACITY)
-    text = (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+    text = (tmp_path / paths.SETTINGS_NAME).read_text(encoding="utf-8")
     assert "pos_x=321" in text and "pos_y=123" in text  # 位置没被碰
     assert "idle_opacity=0.3" in text  # 这一项回到了默认
 
@@ -302,10 +303,10 @@ def test_version_comes_from_installed_metadata(tray) -> None:
     """
     pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
     declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
-    installed = importlib.metadata.version(main.APP_NAME)
+    installed = importlib.metadata.version(paths.APP_NAME)
 
     assert installed == declared  # 装出来的元数据与声明一致(uv sync 用的就是这份 pyproject)
-    assert main.app_version() == installed
+    assert paths.app_version() == installed
     assert tray._version_label.text() == installed
     # 按名字取那一行,不按下标取:菜单顺序由 `test_menu_items_and_order` 负责,这里只关心内容
     row = next(action for action in tray._menu.actions() if action.text() == "版本号")
@@ -320,11 +321,11 @@ def test_data_dir_row_opens_the_config_dir(window, tray, monkeypatch) -> None:
     测试里把 `open_path` 换成替身 —— 真去开会在你屏幕上弹资源管理器。
     """
     opened: list[Path] = []
-    monkeypatch.setattr(main, "open_path", opened.append)
+    monkeypatch.setattr(paths, "open_path", opened.append)
 
     button = tray._open_dir_button
     assert button.text() == "打开"
-    assert str(main.config_dir()) in button.toolTip()  # 不用点开就知道文件在哪
+    assert str(paths.config_dir()) in button.toolTip()  # 不用点开就知道文件在哪
     assert tray._row_actions[button.parentWidget()].text() == "配置和日志目录"  # 按钮在哪一行
 
     menu = tray.contextMenu()
@@ -334,7 +335,7 @@ def test_data_dir_row_opens_the_config_dir(window, tray, monkeypatch) -> None:
     finally:
         menu.close()
 
-    assert opened == [main.config_dir()]  # 打包后这个目录同时放 ini 与日志
+    assert opened == [paths.config_dir()]  # 打包后这个目录同时放 ini 与日志
     assert not menu.isVisible()  # 先收起菜单再开目录,资源管理器才会出现在前台
 
 
@@ -400,7 +401,7 @@ def test_autostart_checkbox_reflects_registry(window, tray, fake_registry) -> No
 
     tray._set_autostart(True)
     assert tray._autostart.isChecked()
-    assert fake_registry.values[main.APP_NAME] == main.autostart_command()
+    assert fake_registry.values[paths.APP_NAME] == main.autostart_command()
 
 
 def test_click_through_checkbox_reflects_window(window, tray) -> None:
@@ -439,7 +440,7 @@ def test_scale_slider_matches_window_value(window, tray, tmp_path) -> None:
     assert window.ui_scale == pytest.approx(0.8)
 
     tray._commit_scale()  # 松手:落盘
-    assert "ui_scale=0.8" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+    assert "ui_scale=0.8" in (tmp_path / paths.SETTINGS_NAME).read_text(encoding="utf-8")
 
 
 def test_tray_scale_commit_lets_the_window_collapse_again(window, tray, qtbot) -> None:

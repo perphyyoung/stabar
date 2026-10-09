@@ -105,8 +105,9 @@ def fake_drives(monkeypatch) -> list[str]:
 def window(qtbot, tmp_path, monkeypatch, low_usage, fake_registry, fake_drives):
     """构造窗口:配置引到 tmp,磁盘数据、注册表、盘符探测都是假的。"""
     import main
+    import paths
 
-    monkeypatch.setattr(main, "settings_path", lambda: tmp_path / "stabar.ini")
+    monkeypatch.setattr(paths, "settings_path", lambda: tmp_path / "stabar.ini")
     window = main.StatusBarWindow()
     qtbot.addWidget(window)
     return window
@@ -120,15 +121,15 @@ def _log_test_failure(item, report) -> None:
     只有日志别的行(事件流上下文)才受级别影响。
     """
     import logging_setup
-    import main
+    import paths
 
     root = logging.getLogger()
     if not any(isinstance(handler, logging.FileHandler) for handler in root.handlers):
-        logging_setup.setup_logging(main.log_dir(), main.APP_NAME)  # 本用例没配日志时补上
+        logging_setup.setup_logging(paths.log_dir(), paths.APP_NAME)  # 本用例没配日志时补上
 
     crash = getattr(report.longrepr, "reprcrash", None)
     detail = crash.message if crash is not None else str(report.longrepr).splitlines()[-1]
-    logging.getLogger(main.APP_NAME).error(
+    logging.getLogger(paths.APP_NAME).error(
         "event=test_failed nodeid=%s phase=%s detail=%s",
         item.nodeid,
         report.when,
@@ -157,9 +158,9 @@ def app_log(tmp_path, monkeypatch):
     自己的处理器;文件句柄也要关掉。
     """
     import logging_setup
-    import main
+    import paths
 
-    monkeypatch.setenv(main.CONFIG_DIR_ENV, str(tmp_path))  # 只影响 ini,日志不理会它
+    monkeypatch.setenv(paths.CONFIG_DIR_ENV, str(tmp_path))  # 只影响 ini,日志不理会它
     monkeypatch.setenv(logging_setup.LOG_LEVEL_ENV, "DEBUG")  # 测试默认看全部事件
     monkeypatch.setattr(sys, "excepthook", sys.excepthook)  # 让被改写的钩子自动回滚
 
@@ -167,8 +168,8 @@ def app_log(tmp_path, monkeypatch):
     saved_handlers = root.handlers[:]
     saved_level = root.level
 
-    logging_setup.setup_logging(main.log_dir(), main.APP_NAME)
-    yield main.log_path()
+    logging_setup.setup_logging(paths.log_dir(), paths.APP_NAME)
+    yield paths.log_path()
 
     for handler in root.handlers:
         if handler not in saved_handlers:
@@ -209,9 +210,9 @@ def scratch_log(app_log, tmp_path, monkeypatch):
     from e2e_support import read_since
 
     import logging_setup
-    import main
+    import paths
 
     monkeypatch.setenv(logging_setup.LOG_LEVEL_ENV, "DEBUG")
-    logging_setup.setup_logging(tmp_path, main.APP_NAME)  # 日志状态由 app_log 负责还原
+    logging_setup.setup_logging(tmp_path, paths.APP_NAME)  # 日志状态由 app_log 负责还原
     path = tmp_path / logging_setup.LOG_NAME
     return SimpleNamespace(path=path, text=lambda: read_since(path), root=tmp_path)

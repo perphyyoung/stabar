@@ -3,6 +3,7 @@
 import sys
 
 import main
+import paths
 
 
 def test_command_dev_quotes_interpreter_and_script(monkeypatch) -> None:
@@ -35,5 +36,5 @@ def test_registry_round_trip(monkeypatch, fake_registry) -> None:
 def test_stale_path_is_not_treated_as_enabled(monkeypatch, fake_registry) -> None:
     """挪过目录之后,注册表里的旧路径不该算"已开启",否则勾选状态会骗人。"""
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    fake_registry.values[main.APP_NAME] = '"D:\\old\\stabar.exe"'
+    fake_registry.values[paths.APP_NAME] = '"D:\\old\\stabar.exe"'
     assert not main.is_autostart_enabled()

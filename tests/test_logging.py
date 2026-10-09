@@ -16,12 +16,13 @@ from PySide6.QtCore import QtMsgType
 
 import logging_setup
 import main
+import paths
 
 
 def _reinit(directory, monkeypatch, level: str) -> None:
     """按指定级别重新初始化日志(同一个文件,追加写)。"""
     monkeypatch.setenv(logging_setup.LOG_LEVEL_ENV, level)
-    logging_setup.setup_logging(directory, main.APP_NAME)
+    logging_setup.setup_logging(directory, paths.APP_NAME)
 
 
 def test_default_level_follows_running_mode(monkeypatch) -> None:
@@ -53,10 +54,10 @@ def test_invalid_level_falls_back_instead_of_crashing(monkeypatch) -> None:
 
 def test_config_override_isolates_ini_but_not_log(tmp_path, monkeypatch) -> None:
     """`STABAR_CONFIG_DIR` 只隔离配置文件;日志固定"打包后 / 其他"两份,不跟着走。"""
-    monkeypatch.setenv(main.CONFIG_DIR_ENV, str(tmp_path))
-    assert main.settings_path() == tmp_path / main.SETTINGS_NAME
-    assert main.log_dir() != tmp_path
-    assert main.log_path() == main.log_dir() / logging_setup.LOG_NAME
+    monkeypatch.setenv(paths.CONFIG_DIR_ENV, str(tmp_path))
+    assert paths.settings_path() == tmp_path / paths.SETTINGS_NAME
+    assert paths.log_dir() != tmp_path
+    assert paths.log_path() == paths.log_dir() / logging_setup.LOG_NAME
 
 
 def test_log_dir_frozen_is_user_config_dir(tmp_path, monkeypatch) -> None:
@@ -66,9 +67,9 @@ def test_log_dir_frozen_is_user_config_dir(tmp_path, monkeypatch) -> None:
         writableLocation=lambda kind: str(tmp_path),
     )
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(main, "QStandardPaths", fake)
-    assert main.log_dir() == tmp_path
-    assert main.log_path() == tmp_path / logging_setup.LOG_NAME
+    monkeypatch.setattr(paths, "QStandardPaths", fake)
+    assert paths.log_dir() == tmp_path
+    assert paths.log_path() == tmp_path / logging_setup.LOG_NAME
 
 
 def test_events_land_in_file_as_single_lines(scratch_log) -> None:
@@ -164,7 +165,7 @@ def test_clamped_opacity_is_logged(app_log, scratch_log, qtbot, monkeypatch, low
 
     这里同时验证 main 的告警确实落进了日志 —— 断言对象是"日志契约",所以留在这一层。
     """
-    main.settings_path().write_text("[General]\nidle_opacity=0\n", encoding="utf-8")
+    paths.settings_path().write_text("[General]\nidle_opacity=0\n", encoding="utf-8")
     _reinit(scratch_log.root, monkeypatch, "WARNING")
 
     window = main.StatusBarWindow()

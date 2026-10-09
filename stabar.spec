@@ -129,7 +129,7 @@ a = Analysis(
     binaries=[],
     # 打包要带的两样东西:
     #   stabar.ico    —— 托盘图标:漏了 QIcon 会静默返回空图标,托盘直接不出现
-    #   分发元数据     —— 版本号从它读(见 main.app_version());这是 PyInstaller 官方给的做法,
+    #   分发元数据     —— 版本号从它读(见 paths.app_version());这是 PyInstaller 官方给的做法,
     #                    只带几百字节的 dist-info,不必把整个 pyproject.toml 塞进包里
     datas=[
         (os.path.join(SPECPATH, "stabar.ico"), "."),

@@ -164,7 +164,7 @@ uv run pytest -q     # 4. 跑测试
   **必须整目录分发**(onedir),exe 单独拷出去跑不起来。
 - **打包时机:dev 与打包产物出现差异时才打包**,不是"改了功能就打包"。判断标准是改动落在
   哪些面上:
-  - **需要打包**:动到 `sys.frozen` 分支(`settings_path` / `autostart_command`)、
+  - **需要打包**:动到 `sys.frozen` 分支(`paths.settings_path` / `autostart_command`)、
     `sys._MEIPASS` 路径解析、`stabar.spec` 裁剪规则、图标/资源文件、依赖版本。
   - **不必打包**:纯逻辑、配色、阈值、格式、注释、文档、测试 —— 这些 dev 与打包后行为一致,
     重新打包只是白花时间(打包也不会改变它们的行为)。

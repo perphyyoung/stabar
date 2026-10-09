@@ -70,6 +70,7 @@ from e2e_support import (
 
 import logging_setup
 import main
+import paths
 
 BASE = Path(__file__).resolve().parent.parent
 EXE = BASE / "dist" / "stabar" / "stabar.exe"
@@ -97,7 +98,7 @@ def target_log_path() -> Path:
     if TARGET == "dev":
         return BASE / logging_setup.LOG_NAME
     base = os.environ.get("LOCALAPPDATA") or str(Path.home())
-    return Path(base) / main.APP_NAME / logging_setup.LOG_NAME
+    return Path(base) / paths.APP_NAME / logging_setup.LOG_NAME
 
 
 def launch_command() -> list[str]:
@@ -145,7 +146,7 @@ def launched(tmp_path, ini_text: str):
     但绝不能透给子进程 —— 打包按体积裁剪时把 qoffscreen.dll 这类插件剔掉了,子进程会直接启动
     失败并弹出 "no Qt platform plugin could be initialized"(见 `开发经验.md` 第 24 条)。
     """
-    (tmp_path / main.SETTINGS_NAME).write_text(ini_text, encoding="utf-8")
+    (tmp_path / paths.SETTINGS_NAME).write_text(ini_text, encoding="utf-8")
     env = {**os.environ, "STABAR_CONFIG_DIR": str(tmp_path), "STABAR_LOG_LEVEL": "DEBUG"}
     # conftest 给**本进程**设了 QT_QPA_PLATFORM=offscreen(离屏跑单测),但绝不能再透给子进程:
     # 打包按体积裁剪时把 qoffscreen.dll 这类插件剔掉了,子进程会直接启动失败并弹出

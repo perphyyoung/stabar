@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 import drives
 import main
+import paths
 
 
 def test_low_usage_keeps_configured_opacity(window) -> None:
@@ -155,7 +156,7 @@ def test_ui_scale_resizes_window_bars_and_persists(window, tmp_path) -> None:
     assert window.size().width() == round(base.width() * 1.5)
     assert abs(window.size().height() - round(base.height() * 1.5)) <= 2  # 各段分别取整
     assert window._bars[0].height() == round(main.ROW_H * 1.5)
-    assert "ui_scale=1.5" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+    assert "ui_scale=1.5" in (tmp_path / paths.SETTINGS_NAME).read_text(encoding="utf-8")
     # 与窗口位置同理:它算几何不算配置,所以「还原配置」不管它
     assert "ui_scale" not in {key for key, *_ in main.RESETTABLE_SETTINGS}
 
@@ -197,7 +198,7 @@ def test_drives_config_limits_what_is_shown(
     """
     ini = tmp_path / "stabar.ini"
     ini.write_text("[General]\ndrives=C,D\n", encoding="utf-8")
-    monkeypatch.setattr(main, "settings_path", lambda: ini)
+    monkeypatch.setattr(paths, "settings_path", lambda: ini)
     monkeypatch.setattr(drives, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
 
     window = main.StatusBarWindow()
@@ -408,7 +409,7 @@ def test_edge_hide_is_on_by_default_and_yields_to_click_through(window, tmp_path
     assert window.edge is None  # 默认位置离屏幕边还有一段距离:不贴边
 
     window.set_edge_hide(False)
-    assert "edge_hide=false" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+    assert "edge_hide=false" in (tmp_path / paths.SETTINGS_NAME).read_text(encoding="utf-8")
 
     window.set_edge_hide(True)
     window.set_click_through(True)
@@ -418,7 +419,7 @@ def test_edge_hide_is_on_by_default_and_yields_to_click_through(window, tmp_path
 
 def test_config_is_written_back_on_first_run(window) -> None:
     """启动回写让配置文件自解释:没有这个键时补上生效值。"""
-    path = main.settings_path()
+    path = paths.settings_path()
     assert path.exists()
     assert f"idle_opacity={main.FIRST_RUN_IDLE_OPACITY}" in path.read_text(encoding="utf-8")
 
@@ -433,7 +434,7 @@ def test_out_of_screen_position_is_clamped(
     """
     ini = tmp_path / "stabar.ini"
     ini.write_text("[General]\npos_x=999999\npos_y=999999\n", encoding="utf-8")
-    monkeypatch.setattr(main, "settings_path", lambda: ini)
+    monkeypatch.setattr(paths, "settings_path", lambda: ini)
 
     window = main.StatusBarWindow()
     qtbot.addWidget(window)

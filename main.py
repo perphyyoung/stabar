@@ -9,7 +9,7 @@
 运行:   uv run python main.py
 打包:   uv run pyinstaller --noconfirm --clean stabar.spec   (产物在 dist\\stabar)
 配置:   开发时 = 项目目录下的 stabar.ini
-        打包后 = %LOCALAPPDATA%\\stabar\\stabar.ini   (见 settings_path())
+        打包后 = %LOCALAPPDATA%\\stabar\\stabar.ini   (见 paths.settings_path())
 日志:   与配置同目录的 stabar.log,开发 INFO、打包 WARNING,可用 STABAR_LOG_LEVEL 覆盖
         (自动化测试用 DEBUG);实现见 logging_setup.py,用法见 日志使用说明.md
 托盘:   左键单击托盘图标 = 切换显示(小组件可以调到几乎看不见,托盘是稳定的入口)
@@ -18,9 +18,7 @@
 
 from __future__ import annotations
 
-import importlib.metadata
 import logging
-import os
 import sys
 import winreg
 from pathlib import Path
@@ -32,10 +30,8 @@ from PySide6.QtCore import (
     QRectF,
     QSettings,
     QSize,
-    QStandardPaths,
     Qt,
     QTimer,
-    QUrl,
     QVariantAnimation,
     Signal,
 )
@@ -43,7 +39,6 @@ from PySide6.QtGui import (
     QAction,
     QColor,
     QCursor,
-    QDesktopServices,
     QFont,
     QFontMetricsF,
     QIcon,
@@ -71,15 +66,13 @@ from PySide6.QtWidgets import (
 import dialogs
 import drives
 import logging_setup
+import paths
 import single_instance
 
 # ======================================================================
 # 观感调节区:想让小组件更醒目,只动这一块(平时的不透明度:托盘菜单或配置文件)
 # ======================================================================
 
-APP_NAME = "stabar"  # 决定打包后配置目录的名字
-# 版本号**不在这里**:唯一来源是 pyproject.toml 的 [project] version,运行时由 app_version() 读它。
-# 不要为了省一次读文件而在代码里另抄一份 —— 抄了就会有一天忘了同步。
 REFRESH_MS = 15_000  # 刷新间隔的默认值(毫秒);托盘菜单可改(见 refresh_seconds)
 REFRESH_MIN_S = 1  # 托盘步进器允许的最小秒数
 REFRESH_MAX_S = 60  # 托盘步进器允许的最大秒数
@@ -87,7 +80,7 @@ REFRESH_DEFAULT_S = REFRESH_MS // 1000  # 首次运行的默认秒数(与历史�
 
 # --- 前景不透明度:文字、进度条、百分比同步生效 ---
 # 平时的值不在这里,而在配置文件里,也可以从托盘菜单的「透明度」滑杆改
-# (见 FIRST_RUN_IDLE_OPACITY / settings_path() / StatusBarWindow.set_idle_opacity)
+# (见 FIRST_RUN_IDLE_OPACITY / paths.settings_path() / StatusBarWindow.set_idle_opacity)
 LIVE_OPACITY = 1.00  # 鼠标悬停 / 自动提亮时的不透明度
 MIN_OPACITY = 0.05  # 配置文件允许的最小值(5%,再小就真的看不见了;滑杆的最小格也是它)
 OPACITY_STEP = 0.05  # 滑杆步进(5%):一格一档,拖动与键盘都是这个粒度
@@ -164,9 +157,6 @@ THRESHOLD_ROWS = (
     ("常亮阈值（%）", "常亮阈值", "占用到这条线界面常亮(红色线也会触发)", "lit"),
 )
 
-# --- 图标文件:托盘图标与 exe 文件图标共用这一份,见 icon_path() ---
-ICON_NAME = "stabar.ico"
-
 # HIT_AREA_ALPHA 不是装饰,是功能代码,别改成 0:
 # Windows 对分层窗口按像素做命中测试,alpha = 0 的像素鼠标会直接穿透到桌面。
 # 背景纯透明后,整个窗口矩形就只有字形能接收鼠标 —— 悬停提亮会变得极难触发,
@@ -179,12 +169,9 @@ OUTLINE_WIDTH = 2.0  # 描边粗细(像素)
 TRACK_RATIO = 0.15  # 进度条底槽不透明度 = 前景不透明度 × 该系数
 
 # --- 持久化 ---
-SETTINGS_NAME = "stabar.ini"  # 实际位置见 settings_path(),开发与打包后不同
 # 只在配置文件里还没有 idle_opacity 这个键时生效(首次运行)。程序启动会把生效值回写,
 # 所以之后改这里不会有任何反应 —— 要调不透明度请直接改配置文件。
 FIRST_RUN_IDLE_OPACITY = 0.30
-# 覆盖配置与日志目录(日志实现见 logging_setup.py),自动化测试靠它做隔离
-CONFIG_DIR_ENV = "STABAR_CONFIG_DIR"
 
 # --- 色相 ---
 BASE_TEXT = (238, 238, 242)
@@ -198,92 +185,6 @@ COLOR_DANGER = (231, 92, 92)
 # ======================================================================
 # 小工具
 # ======================================================================
-
-
-def _app_config_dir() -> Path:
-    """打包后的用户目录(%LOCALAPPDATA%\\stabar)。
-
-    依赖 Qt 的应用名,所以调用方必须等 `setApplicationName(APP_NAME)` 之后再用 ——
-    应用名没设时 AppConfigLocation 会退化成 %LOCALAPPDATA% 本身(实测)。
-    """
-    base = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
-    directory = Path(base) if base else Path.home() / f".{APP_NAME}"
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def config_dir() -> Path:
-    """**配置文件**所在目录,优先级从高到低:
-
-    1. 环境变量 `STABAR_CONFIG_DIR` —— 自动化测试用:把 ini 引到临时目录,不碰你真实的配置;
-    2. 打包运行 -> %LOCALAPPDATA%\\stabar;
-    3. 源码运行 -> 项目目录,方便直接手改。
-
-    开发时留在项目目录是为了方便直接手改;打包后不能再写 exe 旁边,原因有两个:
-    一是 onedir 的 __file__ 指向 _internal 子目录,配置会藏进包内部、升级就丢;
-    二是装到 Program Files 之类的路径下可能根本没有写权限。
-    """
-    override = os.environ.get(CONFIG_DIR_ENV)
-    if override:
-        directory = Path(override)
-    elif getattr(sys, "frozen", False):  # PyInstaller 打包运行时的标志
-        directory = _app_config_dir()
-    else:
-        directory = Path(__file__).parent
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
-
-
-def log_dir() -> Path:
-    """**日志**所在目录,**只有两种**(见 `日志使用说明.md`):
-
-    - 打包运行 -> 用户配置目录(%LOCALAPPDATA%\\stabar),和打包后的 ini 同目录;
-    - 其他情况(源码运行、跑测试)-> 项目目录。
-
-    刻意**不理会** `STABAR_CONFIG_DIR`:那个变量只用来隔离**配置**。日志就两份,测试直接写
-    项目目录这份,跑完能立刻看;代价是多个用例共用一个文件,所以读日志必须按偏移量切
-    (见 `tests/e2e_support.read_since`)。
-    """
-    if getattr(sys, "frozen", False):
-        return _app_config_dir()
-    return Path(__file__).parent
-
-
-def app_version() -> str:
-    """版本号:**唯一来源是 `pyproject.toml` 的 `[project] version`**,这里只负责把它读出来。
-
-    走标准库的 `importlib.metadata` —— 它读的是"已安装分发"的元数据:源码形态靠 `uv sync` 把本工程
-    装成可编辑包,打包形态靠 `stabar.spec` 里的 `copy_metadata`(PyInstaller 官方做法)把那小份
-    `dist-info` 带进 `_internal/`。**不必把 `pyproject.toml` 塞进包里**,代码里也不另抄一份。
-    没有元数据(比如直接 `python main.py`、没同步过环境)就返回 `unknown` 并留一条日志。
-    """
-    try:
-        return importlib.metadata.version(APP_NAME)
-    except importlib.metadata.PackageNotFoundError:
-        log.warning("event=version_unavailable hint=环境里没有本工程的分发,先 uv sync")
-        return "unknown"
-
-
-def settings_path() -> Path:
-    """配置文件位置。"""
-    return config_dir() / SETTINGS_NAME
-
-
-def log_path() -> Path:
-    """日志文件位置。"""
-    return logging_setup.log_path(log_dir())
-
-
-def open_path(path: Path) -> None:
-    """用系统默认程序打开一个路径(这里只用来开目录)。
-
-    单独一层是为了**能替换**:测试里换成替身,免得真弹资源管理器(与 `winreg` 那套注入同一个思路)。
-    目录不存在就先建出来 —— 首次运行就点开时(还没写过任何文件)它可能真的还不存在。
-    """
-    directory = Path(path)
-    directory.mkdir(parents=True, exist_ok=True)
-    log.debug("event=open_dir path=%s", directory)
-    QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
 
 def lerp(a: float, b: float, t: float) -> float:
@@ -499,7 +400,7 @@ def draw_outlined_text(
 # logger。事件行统一写成 "event=<名词> key=value ...",完整清单见 日志使用说明.md。
 # ======================================================================
 
-log = logging.getLogger(APP_NAME)
+log = logging.getLogger(paths.APP_NAME)
 
 
 def human_size(n: float) -> str:
@@ -534,7 +435,7 @@ def is_autostart_enabled() -> bool:
     """注册表里的命令和当前运行方式一致才算开启 —— 换过路径就不算。"""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
-            value, _ = winreg.QueryValueEx(key, APP_NAME)
+            value, _ = winreg.QueryValueEx(key, paths.APP_NAME)
     except OSError:
         return False
     return str(value).strip().casefold() == autostart_command().casefold()
@@ -546,10 +447,10 @@ def set_autostart(enabled: bool) -> None:
         winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE
     ) as key:
         if enabled:
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, autostart_command())
+            winreg.SetValueEx(key, paths.APP_NAME, 0, winreg.REG_SZ, autostart_command())
             return
         try:
-            winreg.DeleteValue(key, APP_NAME)
+            winreg.DeleteValue(key, paths.APP_NAME)
         except FileNotFoundError:
             pass
 
@@ -559,25 +460,14 @@ def set_autostart(enabled: bool) -> None:
 # ======================================================================
 
 
-def icon_path() -> Path:
-    """图标文件位置:开发时在项目目录,打包后在 PyInstaller 的解包目录。
-
-    打包后靠 stabar.spec 的 datas 把 .ico 带进 _internal,所以这里用 sys._MEIPASS 定位。
-    """
-    base = getattr(sys, "_MEIPASS", None)
-    if base:
-        return Path(base) / ICON_NAME
-    return Path(__file__).with_name(ICON_NAME)
-
-
 def make_tray_icon() -> QIcon:
     """托盘图标:直接读 stabar.ico,与 exe 的文件图标同一份文件。"""
-    icon = QIcon(str(icon_path()))
+    icon = QIcon(str(paths.icon_path()))
     if icon.isNull():
         # .ico 要靠 Qt 的 qico.dll 插件解码,打包时漏掉就会走到这里:
         # QIcon 不报错、只返回空图标,表现为托盘图标不出现,所以显式喊一声。
         # 这条必须是日志而不是 print:打包后 stderr 是 None,打印出去就没了。
-        log.warning("event=icon_missing path=%s hint=检查打包是否漏了 qico.dll", icon_path())
+        log.warning("event=icon_missing path=%s hint=检查打包是否漏了 qico.dll", paths.icon_path())
     return icon
 
 
@@ -770,7 +660,7 @@ class StatusBarWindow(QWidget):
         self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.setFixedSize(layout_size(UI_SCALE_DEFAULT, 1))  # 占位,真实尺寸由 _build_bars 定
 
-        self._settings = QSettings(str(settings_path()), QSettings.IniFormat)
+        self._settings = QSettings(str(paths.settings_path()), QSettings.IniFormat)
         self._drag_offset: QPoint | None = None
         # 整窗缩放:记住生效值;托盘滑杆拖动时只预览,松手 / 关菜单才提交
         self._ui_scale = self._read_ui_scale()
@@ -831,7 +721,7 @@ class StatusBarWindow(QWidget):
         self._settings.sync()
         log.debug(
             "event=config file=%s idle_opacity=%s refresh_seconds=%d warn=%.2f lit=%.2f danger=%.2f",
-            settings_path(),
+            paths.settings_path(),
             self._idle_opacity,
             self._refresh_seconds,
             self._warn_threshold,
@@ -1701,7 +1591,7 @@ class TrayIcon(QSystemTrayIcon):
     def __init__(self, window: StatusBarWindow) -> None:
         super().__init__(make_tray_icon())
         self._window = window
-        self.setToolTip(APP_NAME)
+        self.setToolTip(paths.APP_NAME)
 
         self._menu = QMenu()
         # 菜单项默认**不**显示提示(QMenu::toolTipsVisible 默认 false),要显式打开;
@@ -1934,7 +1824,7 @@ class TrayIcon(QSystemTrayIcon):
         静态展示,点了不做任何事;提示只讲版本 —— 目录信息单独占一行(见 `_add_data_dir_row`),
         版本行的悬停不再夹带路径。
         """
-        version = app_version()
+        version = paths.app_version()
         self._version_label = QLabel(version, self._menu)
         self._version_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -1949,11 +1839,11 @@ class TrayIcon(QSystemTrayIcon):
     def _add_data_dir_row(self) -> None:
         """一行「配置和日志目录」:右边「打开」按钮,点了交给系统打开那个目录。
 
-        目录取 `config_dir()` —— 打包后它和日志同目录(%LOCALAPPDATA%\\stabar),源码运行是项目目录。
+        目录取 `paths.config_dir()` —— 打包后它和日志同目录(%LOCALAPPDATA%\\stabar),源码运行是项目目录。
         完整路径直接写在提示里:不用点开就知道文件在哪。
         """
         self._open_dir_button = QPushButton("打开", self._menu)
-        self._open_dir_button.setToolTip(f"打开 {config_dir()}")
+        self._open_dir_button.setToolTip(f"打开 {paths.config_dir()}")
         self._open_dir_button.clicked.connect(self._open_data_dir)
         self._add_row(
             "配置和日志目录",
@@ -1965,7 +1855,7 @@ class TrayIcon(QSystemTrayIcon):
     def _open_data_dir(self) -> None:
         """点「打开」:先收起菜单再让系统打开 —— 这样资源管理器才会出现在前台、不被菜单挡着。"""
         self._menu.close()
-        open_path(config_dir())
+        paths.open_path(paths.config_dir())
 
     def _add_scale_row(self, window: StatusBarWindow) -> None:
         """一行「调整尺寸」滑杆:一格 1%,量程 60% ~ 200%。
@@ -2149,15 +2039,15 @@ def main() -> int:
     # QStandardPaths 靠应用名决定配置目录,必须在创建窗口(也就是读配置)之前设置。
     # 日志目录同样由它算出,所以 setup_logging() 也必须排在这一行之后 ——
     # 实测:应用名没设时 AppConfigLocation 会退化成 %LOCALAPPDATA% 本身,日志就跟配置分家了。
-    app.setApplicationName(APP_NAME)
-    level = logging_setup.setup_logging(log_dir(), APP_NAME)
+    app.setApplicationName(paths.APP_NAME)
+    level = logging_setup.setup_logging(paths.log_dir(), paths.APP_NAME)
     log.info(
         "event=start version=%s frozen=%s level=%s config=%s log=%s",
-        app_version(),  # 顺便把版本记在启动行:排查时"这是哪一版"最常被问
+        paths.app_version(),  # 顺便把版本记在启动行:排查时"这是哪一版"最常被问
         bool(getattr(sys, "frozen", False)),
         logging.getLevelName(level),
-        settings_path(),
-        log_path(),
+        paths.settings_path(),
+        paths.log_path(),
     )
     # 打包成 --noconsole 后 stderr 是 None:先记下来,省得以后怀疑日志缺了控制台那一半
     log.debug("event=start stderr=%s", "none" if sys.stderr is None else "available")
@@ -2165,7 +2055,7 @@ def main() -> int:
     # 单实例:同一份配置目录只允许一个进程 —— 两份会互相覆盖配置、共用一份日志
     # (启动时的"超限清空"会把对方的内容一起清掉),托盘还会多出一个图标让人分不清。
     # 再启动一次是**常见路径**:自启已经拉起过了,用户又双击了一次 exe。
-    single = single_instance.SingleInstance(config_dir())
+    single = single_instance.SingleInstance(paths.config_dir())
     if not single.acquire():
         log.info("event=single_instance action=exit")  # 上面的通知已让已有实例显示小组件
         return 0

@@ -14,7 +14,7 @@ dependencies = [
 
 [tool.setuptools]
 # 本工程没有包目录,是根目录下平铺的几个模块,显式列给 setuptools
-py-modules = ["main", "dialogs", "drives", "logging_setup", "single_instance"]
+py-modules = ["main", "dialogs", "drives", "logging_setup", "paths", "single_instance"]
 
 [dependency-groups]
 dev = [
