@@ -42,6 +42,7 @@ extend-ignore-names = [
     "paintEvent",
     "enterEvent",
     "leaveEvent",
+    "showEvent",
     "mousePressEvent",
     "mouseMoveEvent",
     "mouseReleaseEvent",

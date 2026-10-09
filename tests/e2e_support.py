@@ -84,7 +84,8 @@ LEFTDOWN, LEFTUP = 0x0002, 0x0004
 RIGHTDOWN, RIGHTUP = 0x0008, 0x0010
 KEYUP = 0x0002
 
-# 拖动偏移:小一点,免得窗口被拖到屏幕外
+# 拖动偏移:默认小一点(只验证"拖得动");要拖到屏幕外就显式传 dx(光标到屏幕边缘会被系统夹住,
+# 所以"压出屏幕多少像素"取决于按下时光标离边缘多远 —— 见 `drag`)
 DRAG_DX, DRAG_DY = 36, 24
 DRAG_STEPS = 6
 
@@ -218,15 +219,19 @@ def center_of(hwnd: int) -> tuple[int, int]:
     return (left + right) // 2, (top + bottom) // 2
 
 
-def drag(hwnd: int) -> None:
-    """真拖动:按下 → 分步移动 → 抬起。位置先放稳,不稳就抛 InterferenceError。"""
+def drag(hwnd: int, dx: int = DRAG_DX, dy: int = DRAG_DY) -> None:
+    """真拖动:按下 → 分步移动 → 抬起。位置先放稳,不稳就抛 InterferenceError。
+
+    `dx` 是光标要走的位移;窗口跟的是**光标的位移**,而光标到屏幕边缘会被系统夹住 —— 所以想让
+    窗口压出屏幕,得让光标**从远处**往边上走(压出多少 = 按下时光标离那条边多远)。
+    """
     if left_button_down():
         raise InterferenceError("左键在动作前已被按下")
     x, y = center_of(hwnd)
     place(x, y)
     _send(_mouse(LEFTDOWN))
     try:
-        step_x, step_y = DRAG_DX // DRAG_STEPS, DRAG_DY // DRAG_STEPS
+        step_x, step_y = dx // DRAG_STEPS, dy // DRAG_STEPS
         for step in range(1, DRAG_STEPS + 1):
             set_cursor(x + step_x * step, y + step_y * step)
             time.sleep(0.06)
@@ -467,10 +472,9 @@ def click_at(x: int, y: int, *, right: bool = False) -> None:
 # ======================================================================
 # 按名称选菜单项:UI Automation(只有 B 层用)
 #
-# 以前是"按 N 次 ↓ 选第 N 项",那个 N 是菜单里的**位置**:菜单一重排就失效,而且是手工数出来的
-# (实测数错过一次:写 10 而「隐藏」在第 11 项,因为 E2E 默认 skip,错了很久没人发现)。
+# 选哪一项按**名称**定位,不按"第几项" —— 位置一变(菜单重排、增删项)旧写法就失效。
 #
-# 改用 Windows 给辅助技术与自动化测试的正式接口 —— UI Automation。Qt 把菜单暴露得很完整
+# 凭据是 Windows 给辅助技术与自动化测试的正式接口 —— UI Automation。Qt 把菜单暴露得很完整
 # (进程外实测,宿主与查探是两个进程):
 #
 #     Class='QMenu'   ← 菜单窗口
@@ -515,7 +519,7 @@ def click_menu_item(pattern: str, timeout: float = 5.0, *, closes_menu: bool = T
     `InterferenceError`,交给调用方的 `guarded()` 重试或跳过,而不是记成失败。
 
     `closes_menu=False` 用于"点完程序就退出"的项(如「退出」):那时**菜单窗口还在**(进程正在退),
-    不能拿"菜单没关"当点空了(实测踩到过:把它误判成干扰,重试时程序已经没了,用例反而失败)。
+    不能拿"菜单没关"当点空了 —— 那会被判成"被真人鼠标干扰",重试时程序已经没了。
     """
     if left_button_down():
         raise InterferenceError("左键在动作前已被按下")

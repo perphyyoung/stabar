@@ -25,8 +25,7 @@ $env:STABAR_E2E = "1"; uv run pytest tests/test_e2e_real_input.py -q
 以及真实退出路径。
 
 **选菜单项一律按名称**:用 UI Automation 找到那一项再真点(`e2e_support.click_menu_item`),
-与它在菜单里的位置**无关**。以前是"按 N 次 ↓ 到第 N 项",那个 N 得手工数、菜单一重排就失效
-(而且真数错过一次:写 10,而「隐藏」在第 11 项)。
+与它在菜单里的位置**无关** —— 按"第 N 项"选的写法一改菜单就失效。
 
 日志按设计只有两份(打包后 / 其他):打包产物写 `%LOCALAPPDATA%\\stabar\\stabar.log`,而且
 **不理会** `STABAR_CONFIG_DIR`(那个变量只隔离配置)。所以这里要按真实路径找日志,并按偏移量只读
@@ -35,6 +34,7 @@ $env:STABAR_E2E = "1"; uv run pytest tests/test_e2e_real_input.py -q
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import subprocess
@@ -54,6 +54,7 @@ from e2e_support import (
     drag,
     find_window,
     is_visible,
+    place,
     read_events,
     read_since,
     rect_of,
@@ -134,19 +135,15 @@ def _stop(proc) -> None:
         proc.kill()
 
 
-@pytest.fixture
-def app(tmp_path):
-    """启动被测进程:配置隔离到 tmp,日志按"只有两份"的落点读。
+@contextlib.contextmanager
+def launched(tmp_path, ini_text: str):
+    """按给定的 ini 起一个被测进程,交出窗口 / 日志句柄。**启动路径只有这一份**。
 
-    配置里**预置窗口位置**(工作区左上角):否则会走产品"首次运行摆右上角"的默认 —— 那是给
-    用户看的,而且右上角紧挨托盘/任务栏、拖拽用例的 +36/+24 还会顶到屏幕右缘。位置由测试指定,
-    启动后立刻断言窗口真落在那里(对不上说明 ini 没被用上)。
+    `env.pop("QT_QPA_PLATFORM", None)`:conftest 给**本进程**设了 offscreen(离屏跑单测),
+    但绝不能透给子进程 —— 打包按体积裁剪时把 qoffscreen.dll 这类插件剔掉了,子进程会直接启动
+    失败并弹出 "no Qt platform plugin could be initialized"(见 `开发经验.md` 第 24 条)。
     """
-    area_left, area_top, _, _ = work_area()
-    seed_x, seed_y = area_left + main.EDGE_MARGIN, area_top + main.EDGE_MARGIN
-    (tmp_path / main.SETTINGS_NAME).write_text(
-        f"[General]\npos_x={seed_x}\npos_y={seed_y}\n", encoding="utf-8"
-    )
+    (tmp_path / main.SETTINGS_NAME).write_text(ini_text, encoding="utf-8")
     env = {**os.environ, "STABAR_CONFIG_DIR": str(tmp_path), "STABAR_LOG_LEVEL": "DEBUG"}
     # conftest 给**本进程**设了 QT_QPA_PLATFORM=offscreen(离屏跑单测),但绝不能再透给子进程:
     # 打包按体积裁剪时把 qoffscreen.dll 这类插件剔掉了,子进程会直接启动失败并弹出
@@ -163,10 +160,6 @@ def app(tmp_path):
         pid = _pid_from_log(log, since) or proc.pid  # dev 形态下两者不同,见 _pid_from_log
         hwnd = find_window(pid)
         assert hwnd, f"没找到窗口句柄(pid={pid})"
-        left, top, _, _ = rect_of(hwnd)
-        assert (left, top) == (seed_x, seed_y), (
-            f"窗口没落在 ini 指定的位置:期望 {(seed_x, seed_y)} 实际 {(left, top)}"
-        )
         yield SimpleNamespace(
             proc=proc,
             pid=pid,
@@ -179,6 +172,24 @@ def app(tmp_path):
         )
     finally:
         _stop(proc)
+
+
+@pytest.fixture
+def app(tmp_path):
+    """启动被测进程:配置隔离到 tmp,日志按"只有两份"的落点读。
+
+    配置里**预置窗口位置**(工作区左上角):否则会走产品"首次运行摆右上角"的默认 —— 那是给
+    用户看的,而且右上角紧挨托盘/任务栏、拖拽用例的 +36/+24 还会顶到屏幕右缘。位置由测试指定,
+    启动后立刻断言窗口真落在那里(对不上说明 ini 没被用上)。
+    """
+    area_left, area_top, _, _ = work_area()
+    seed_x, seed_y = area_left + main.EDGE_MARGIN, area_top + main.EDGE_MARGIN
+    with launched(tmp_path, f"[General]\npos_x={seed_x}\npos_y={seed_y}\n") as running:
+        left, top, _, _ = rect_of(running.hwnd)
+        assert (left, top) == (seed_x, seed_y), (
+            f"窗口没落在 ini 指定的位置:期望 {(seed_x, seed_y)} 实际 {(left, top)}"
+        )
+        yield running
 
 
 def guarded(action, rounds: int = 3):
@@ -308,6 +319,133 @@ def test_real_tray_menu_hides_window(app) -> None:
 
     assert is_visible(app.hwnd) == 0  # 外部事实
     assert_in_order(app.events(), "event=menu open=tray", "event=menu item=隐藏")
+
+
+def _edge_tail_size(edge: str = "left") -> tuple[int, int]:
+    """尾巴的尺寸(ini 里没写 ui_scale,所以就是基准像素);方向随边,见 `main.tail_layout`。"""
+    width, height, _ = main.tail_layout(edge, len(main.DRIVES))
+    return width, height
+
+
+def _wait_until(condition, message: str) -> None:
+    """等到条件成立(最多 5 秒);超时就用 message 报错。"""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not condition():
+        time.sleep(0.1)
+    assert condition(), message
+
+
+def test_edge_hide_collapses_to_a_tail_then_hover_brings_it_back(tmp_path) -> None:
+    """贴边隐藏:静止时折叠成小尾巴 → 真鼠标蹭到尾巴长回展开 → 移开再收起。
+
+    结论全落在**窗口矩形**这个外部事实上(不看日志)。尾巴必须整块留在屏幕内、且有 alpha ≥ 1 的
+    像素:整块跑出屏幕又收不到鼠标的话,收起之后就再也蹭不回来了(命中规则见 README 必读第 2 条)。
+    """
+    ini = "[General]\npos_x=0\npos_y=300\nedge_hide=true\n"
+    with launched(tmp_path, ini) as running:
+        edge, area_top = work_area()[0], work_area()[1]  # 屏幕左缘(工作区左边界一般是 0)
+
+        def geometry() -> tuple[int, int, int, int]:
+            return rect_of(running.hwnd)
+
+        _wait_until(
+            lambda: (
+                (geometry()[2] - geometry()[0], geometry()[3] - geometry()[1]) == _edge_tail_size()
+            ),
+            "静止之后没有折叠成尾巴",
+        )
+        left, top, _, _ = geometry()
+        assert left == edge, "尾巴没有贴着屏幕边"
+        assert top >= area_top, "尾巴露到屏幕上方了"
+
+        guarded(lambda: place(*center_of_rect(geometry())))  # 真鼠标蹭到尾巴
+        _wait_until(
+            lambda: (
+                (geometry()[2] - geometry()[0], geometry()[3] - geometry()[1]) != _edge_tail_size()
+            ),
+            "鼠标蹭到尾巴之后没有长回展开形态",
+        )
+        assert geometry()[0] == edge, "长回来之后没有落在锚点(与屏幕边齐平)"
+
+        guarded(lambda: place(edge + 600, top + 200))  # 移开
+        _wait_until(
+            lambda: (
+                (geometry()[2] - geometry()[0], geometry()[3] - geometry()[1]) == _edge_tail_size()
+            ),
+            "鼠标移开之后没有收起",
+        )
+
+
+def test_edge_hide_pulls_back_a_half_off_screen_drag(tmp_path) -> None:
+    """拖出去一半(压出屏幕)也算贴边:松手拉回边上摆正,然后照常收起成尾巴。
+
+    窗口跟的是**光标的位移**,而光标到屏幕边缘会被系统夹住 —— 所以这条用例把窗口先摆在屏幕中间,
+    再把光标一路拖到左边缘:窗口因此压出去"按下时光标离边缘的那一段"(这里正好半个宽度)。
+    """
+    area_left, area_top, area_right, _ = work_area()
+    middle = (area_left + area_right) // 2
+    half = main.WINDOW_W // 2
+    ini = f"[General]\npos_x={middle}\npos_y={area_top + 200}\nedge_hide=true\n"
+    with launched(tmp_path, ini) as running:
+
+        def geometry() -> tuple[int, int, int, int]:
+            return rect_of(running.hwnd)
+
+        # 按下时光标在窗口中心 = middle + half;把它拖到屏幕左缘,窗口就压出去 half 像素
+        guarded(lambda: drag(running.hwnd, dx=-(middle + half)))
+        _wait_until(lambda: geometry()[0] == area_left, "压出屏幕之后没有回到边上摆正")
+
+        # 松手时光标还停在窗口上(就落在它的左边缘),窗口此刻**本该**保持展开 ——
+        # 所以先把鼠标移开,再看它收起
+        guarded(lambda: place(area_right - 200, area_top + 400))
+        _wait_until(
+            lambda: (
+                (geometry()[2] - geometry()[0], geometry()[3] - geometry()[1]) == _edge_tail_size()
+            ),
+            "鼠标移开之后没有收起成尾巴",
+        )
+        assert geometry()[0] == area_left, "尾巴留在屏幕内:压出去的窗口不会被拖丢"
+
+
+def test_edge_hide_drag_out_from_the_tail_stays_where_dropped(tmp_path) -> None:
+    """从收起的小尾巴上拖出去:松手后窗口应当留在放下的位置,不能被拽回边上。
+
+    这是"贴着边收着 → 想把它挪到屏幕中间"这条日常路径:按尾巴会先长回展开形态(见
+    `mousePressEvent`),随后由真鼠标把它拖走。松手那一刻判定用的必须是**用户放下的位置** ——
+    先搬回旧锚点再判,判出来就还是"贴着边",窗口会被拽回去。
+    """
+    drop_dx, drop_dy = 300, 160
+    anchor_y = 300
+    ini = f"[General]\npos_x=0\npos_y={anchor_y}\nedge_hide=true\n"
+    with launched(tmp_path, ini) as running:
+        edge, area_top = work_area()[0], work_area()[1]
+
+        def geometry() -> tuple[int, int, int, int]:
+            return rect_of(running.hwnd)
+
+        _wait_until(
+            lambda: (
+                (geometry()[2] - geometry()[0], geometry()[3] - geometry()[1]) == _edge_tail_size()
+            ),
+            "静止之后没有折叠成尾巴",
+        )
+
+        # 真鼠标:按在尾巴上(窗口当场长回展开形态)→ 一路拖到屏幕中间 → 松手
+        guarded(lambda: drag(running.hwnd, dx=drop_dx, dy=drop_dy))
+        time.sleep(0.6)  # 等被测进程处理完松开
+
+        left, top, right, bottom = geometry()
+        assert left > edge + main.EDGE_SNAP_PX, f"松手后被拽回屏幕边上了:left={left}"
+        assert (right - left, bottom - top) != _edge_tail_size(), "拖出去之后又被收起成尾巴了"
+        assert (
+            abs(left - (edge + drop_dx)) <= 4 and abs(top - (area_top + anchor_y + drop_dy)) <= 4
+        ), (
+            f"窗口没停在放下的位置:期望约 ({edge + drop_dx}, {area_top + anchor_y + drop_dy}) 实际 ({left}, {top})"
+        )
+
+        # 也别过一会儿又自己收起:松手时光标就在窗口上,窗口已经不在边上、不该再贴边
+        time.sleep(main.EDGE_HIDE_DELAY_MS / 1000 + 0.6)
+        assert (geometry()[2] - geometry()[0], geometry()[3] - geometry()[1]) != _edge_tail_size()
 
 
 def test_second_launch_wakes_the_running_instance(app) -> None:

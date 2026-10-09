@@ -32,6 +32,7 @@ from PySide6.QtCore import (
     QPoint,
     QRectF,
     QSettings,
+    QSize,
     QStandardPaths,
     Qt,
     QTimer,
@@ -112,6 +113,32 @@ ROW_H = 22
 PAD = 6
 GAP = 6
 EDGE_MARGIN = 24
+
+# --- 贴边隐藏 ---
+# 收起 = **折叠**成贴在屏幕边上的一条**断线**:线只有一条,断成几段,一段表示一个盘;
+# 指针蹭到它(或第二个实例启动)再长回原样。**不画底板 / 描边** —— 线段自己是彩色的,亮暗壁纸
+# 上都看得清,少一层就少一份遮挡。
+#
+# 每段**长度固定**(只表示"这个盘在这儿"),状态**只靠颜色** —— 与展开时的进度条同源;
+# 整条线**与屏幕边平行**:贴左 / 贴右是竖的,贴上 / 贴下是横的(见 `tail_layout`)。
+# 尺寸是**固定的设备像素**,不随主界面缩放变(「调整尺寸」只管展开形态)。
+#
+# 尾巴**整块都在屏幕内**,所以鼠标总能蹭到它 —— 这满足命中规则的要求
+# (见 README 必读第 2 条:窗口得在屏幕内留下 alpha ≥ 1 的像素,否则再也点不回来)。
+TAIL_SEGMENT = 6  # 每段(每块盘)的长度
+TAIL_LINE_H = 2  # 线宽
+TAIL_DASH_GAP = 2  # 两段之间的断开间隙(断开就靠它)
+TAIL_MARGIN = 3  # 线到尾巴边缘的留白(尾巴同时是命中区:线只有 2px 粗,留点余量才好蹭)
+# 线的透明度不跟着未报警透明度一路暗下去:它是收起时唯一能点回来的东西,淡到看不见就等于
+# 窗口丢了。下限之外仍随提亮一起变亮(悬停 / 报警)。
+TAIL_MIN_ALPHA = 90  # 线的不透明度下限
+# 贴边判定的阈值:取**最近**那条边,它的"内缩量"不超过这个值就算贴上。
+# 内缩量是**带符号**的:窗口还在屏幕内为正,压出屏幕为负 —— 所以"拖出一半"这种也判得上,
+# 不必为"压边"另立一条规则(见 `snap_edge`)。
+EDGE_SNAP_PX = 8
+EDGE_HIDE_DELAY_MS = 250  # 指针离开后隔多久才收起:没有它,光标划过边缘会来回弹
+EDGE_HIDE_DEFAULT = True  # 默认开:贴到边就收起成小尾巴
+EDGE_HIDE_KEY = "edge_hide"
 
 # --- 整窗缩放(托盘「调整尺寸」滑杆调)---
 # 存的是**系数**而不是像素:窗口高度是"盘数 × 行高"推出来的,存绝对高会跟盘数打架;而上面的
@@ -260,6 +287,113 @@ def lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
 
+def clamp(value: int, low: int, high: int) -> int:
+    """把 value 夹在 [low, high] 内(high 比 low 小时以 low 为准 —— 窗口比工作区还大时的兜底)。"""
+    return max(low, min(high, value))
+
+
+def snap_edge(
+    x: int, y: int, width: int, height: int, area: tuple[int, int, int, int]
+) -> str | None:
+    """窗口贴在哪条屏幕边上:取**最近**那条边,它的内缩量 ≤ `EDGE_SNAP_PX` 就算贴上,否则 None。
+
+    `area` 是**左下开区间**的矩形 (left, top, right, bottom)(Qt 的 `QRect.right()` 是闭区间,
+    调用方要先 +1 换成这个口径)。
+
+    内缩量**带符号**:窗口还在屏幕内时为正(离这条边还有多远),压出屏幕时为负(越出去多少)。
+    取的是**最小**的那个 —— 都在屏幕内时它就等于"离得最近的那条",而压出去的那条是负数、
+    自然排在最前。于是"贴住边"和"拖出去一半"是同一条规则,不必为后者再立一条。
+
+    ⚠️ **只对展开状态用**:收起成尾巴时窗口只有十几像素,判定结果没有意义(尾巴本来就贴在那条边上)。
+    贴边状态一旦定下来就保持,只有拖动结束、开关变化、缩放时才重新判定。
+    """
+    left, top, right, bottom = area
+    inset = {
+        "left": x - left,
+        "right": right - (x + width),
+        "top": y - top,
+        "bottom": bottom - (y + height),
+    }
+    edge = min(inset, key=lambda name: inset[name])
+    return edge if inset[edge] <= EDGE_SNAP_PX else None
+
+
+def tail_pos(
+    edge: str,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    tail_width: int,
+    tail_height: int,
+    area: tuple[int, int, int, int],
+) -> tuple[int, int]:
+    """收起成尾巴后尾巴的左上角:贴着那条边,沿边方向对齐展开时的中心。
+
+    `x/y/width/height` 传**展开时**的矩形(锚点那份):尾巴落在它的中间,展开才不会横向跳。
+    位置一律夹在工作区内 —— 窗口停在角落时,尾巴不能因为"对齐中心"而露到屏幕外(露出去就点不到了)。
+    """
+    left, top, right, bottom = area
+    center_x = clamp(x + width // 2 - tail_width // 2, left, right - tail_width)
+    center_y = clamp(y + height // 2 - tail_height // 2, top, bottom - tail_height)
+    if edge == "left":
+        return left, center_y
+    if edge == "right":
+        return right - tail_width, center_y
+    if edge == "top":
+        return center_x, top
+    return center_x, bottom - tail_height  # bottom
+
+
+def scaled_layout(scale: float, rows: int) -> tuple[int, int, int, int]:
+    """整窗缩放后的 (边距 pad, 行距 gap, 行高 row_h, 宽度 width)。
+
+    抽成纯函数是因为有两个消费方:窗口重排(`StatusBarWindow.apply_scale`)和"展开尺寸"的推算
+    (收起 / 展开动画的目标、用例断言)—— 各推一遍迟早推歪。
+    """
+    return (
+        round(PAD * scale),
+        round(GAP * scale),
+        max(1, round(ROW_H * scale)),
+        max(1, round(WINDOW_W * scale)),
+    )
+
+
+def layout_size(scale: float, rows: int) -> QSize:
+    """展开状态下整窗的尺寸(与 `apply_scale` 同一套算式,不另抄一份)。"""
+    pad, gap, row_h, width = scaled_layout(scale, rows)
+    return QSize(width, pad * 2 + row_h * rows + gap * (rows - 1))
+
+
+def tail_layout(edge: str, rows: int) -> tuple[int, int, list[tuple[int, int, int, int]]]:
+    """尾巴的尺寸与每块盘的线段矩形(设备像素,左上角为原点)—— 尾巴长什么样全在这一处。
+
+    **一条线,断成几段**:所有线段排在同一条直线上(同一个 y),段间留 `TAIL_DASH_GAP` 的空隙,
+    一段表示一个盘;每段长度固定(`TAIL_SEGMENT`),状态是颜色的事(见 `DiskBar.status_rgb`)。
+    整条线**与屏幕边平行** —— 贴左 / 贴右把矩形转 90°(x↔y、宽高互换),线就是竖的。
+
+    尺寸**不随主界面缩放变**:「调整尺寸」管的是展开形态,贴边后这个标记不该跟着变粗变长。
+    只有盘数会影响线的长度(要装得下每块盘一段)。
+
+    返回 (宽, 高, [线段矩形…]),矩形顺序与盘序一致 —— 调用方拿着直接画,不必再判断方向。
+    """
+    length = TAIL_MARGIN * 2 + rows * TAIL_SEGMENT + (rows - 1) * TAIL_DASH_GAP
+    thick = TAIL_MARGIN * 2 + TAIL_LINE_H
+    lines = [
+        # 先按"线沿 x 轴"排;竖线把矩形转 90°(x↔y、宽高互换)即可,段的长度不变
+        (
+            TAIL_MARGIN + index * (TAIL_SEGMENT + TAIL_DASH_GAP),
+            TAIL_MARGIN,
+            TAIL_SEGMENT,
+            TAIL_LINE_H,
+        )
+        for index in range(rows)
+    ]
+    if edge in ("left", "right"):
+        return thick, length, [(y, x, h, w) for x, y, w, h in lines]
+    return length, thick, lines
+
+
 def with_alpha(rgb: tuple[int, int, int], alpha: float) -> QColor:
     """给颜色换一个 alpha。**alpha 是 0~255,不是 0~1** —— 写 0.55 会被取整成 1(几乎看不见)。"""
     color = QColor(*rgb)
@@ -304,6 +438,7 @@ RESETTABLE_SETTINGS = (
     ("danger_threshold", "红色阈值", DANGER_THRESHOLD, percent_text),
     ("lit_threshold", "常亮阈值", LIT_THRESHOLD, percent_text),
     ("idle_opacity", "未报警透明度", FIRST_RUN_IDLE_OPACITY, percent_text),
+    (EDGE_HIDE_KEY, "贴边隐藏", EDGE_HIDE_DEFAULT, lambda value: "开" if value else "关"),
 )
 
 
@@ -518,13 +653,27 @@ class DiskBar(QWidget):
         self._danger = danger
         self.update()
 
-    def _bar_color(self, ratio: float) -> QColor:
+    def _bar_rgb(self, ratio: float) -> tuple[int, int, int]:
+        """状态色(含滞回):到红色线变红,过橙色线变橙,否则主色。进度条与尾巴共用这一处判定。"""
         if ratio >= self._danger:
             self._warned = True
-            return with_alpha(COLOR_DANGER, self._alpha)
+            return COLOR_DANGER
         floor = self._warn - COLOR_HYSTERESIS if self._warned else self._warn
         self._warned = ratio >= floor
-        return with_alpha(COLOR_WARN if self._warned else COLOR_ACCENT, self._alpha)
+        return COLOR_WARN if self._warned else COLOR_ACCENT
+
+    def _bar_color(self, ratio: float) -> QColor:
+        return with_alpha(self._bar_rgb(ratio), self._alpha)
+
+    def status_rgb(self) -> tuple[int, int, int]:
+        """收起的尾巴上那条线段要的颜色(不带 alpha)。
+
+        与进度条同源(`_bar_rgb`,含滞回),所以收起来之后颜色不会跟展开时对不上;长度不由它决定
+        —— 线段长度是固定的,状态只靠颜色。盘不可用时给暗色(它不代表任何档位)。
+        透明度由尾巴自己定(它比进度条更需要看得见)。
+        """
+        ratio = self.ratio()
+        return BASE_DIM if ratio is None else self._bar_rgb(ratio)
 
     def set_scale(self, scale: float) -> None:
         """整窗缩放:只需设高度,其余交给绘制变换 —— 见 `paintEvent` 开头。"""
@@ -602,16 +751,37 @@ class StatusBarWindow(QWidget):
         # Qt 文档:tooltip 默认只对**活动窗口**显示,而本窗口置顶、从不被激活(真人实测:
         # 详情会时有时无甚至一直不出现)。开了这条,非活动窗口也照常弹详情。
         self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
-        self.setFixedSize(
-            WINDOW_W,
-            PAD * 2 + ROW_H * len(DRIVES) + GAP * (len(DRIVES) - 1),
-        )
+        self.setFixedSize(layout_size(UI_SCALE_DEFAULT, len(DRIVES)))
 
         self._settings = QSettings(str(settings_path()), QSettings.IniFormat)
         self._drag_offset: QPoint | None = None
         # 整窗缩放:记住生效值;托盘滑杆拖动时只预览,松手 / 关菜单才提交
         self._ui_scale = self._read_ui_scale()
         self._saved_ui_scale = self._ui_scale
+
+        # 贴边隐藏:只记"贴哪条边 + 展开时的锚点";收起 / 展开只改窗口本身,不动配置。
+        # **必须排在下面的 apply_scale() 之前** —— 它会读 `self._edge` 决定要不要重算贴边。
+        self._edge_hide = self._read_edge_hide()
+        self._edge: str | None = None
+        self._edge_hidden = False  # True = 尾巴形态(收起途中也算,见 _hide_to_edge)
+        self._edge_anchor = QPoint()  # 展开时的位置(吸附后 = 与该屏幕边齐平)
+        self._edge_start = QPoint()  # 形变动画的起点 / 终点(位置)
+        self._edge_target = QPoint()
+        self._edge_start_size = QSize()
+        self._edge_target_size = QSize()
+        self._edge_sliding = False  # 形变期间禁止被"离开"事件重新排上收起(见 leaveEvent)
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setSingleShot(True)
+        self._edge_timer.setInterval(EDGE_HIDE_DELAY_MS)
+        self._edge_timer.timeout.connect(self._hide_to_edge)
+        self._edge_anim = QVariantAnimation(self)
+        self._edge_anim.setDuration(FADE_MS)  # 与提亮同一时长,观感一致
+        self._edge_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._edge_anim.valueChanged.connect(self._morph_step)
+        self._edge_anim.finished.connect(self._morph_done)
+        self._tail_alpha = (
+            float(FIRST_RUN_IDLE_OPACITY) * 255
+        )  # 尾巴用的前景不透明度,见 _apply_level
 
         # 提亮程度:唯一的动画变量,0 = 平时的最暗档
         self._level = 0.0
@@ -675,6 +845,10 @@ class StatusBarWindow(QWidget):
         self._apply_level(0.0)  # 先按最暗档铺一次,避免动画不触发时停留在全亮
         self.refresh()
         self._restore_position()
+        if self._edge_hide:
+            # 上次就贴在边上:重启后接着贴(否则会停在边上却不再收起)。
+            # 收起的定时器交给 showEvent 去排 —— 这里排会被随后的 show() 清掉。
+            self.snap_to_edge()
 
     # ---- 持久化 ----
     def _read_idle_opacity(self) -> float:
@@ -824,6 +998,8 @@ class StatusBarWindow(QWidget):
         self._danger_threshold = danger
         for bar in self._bars:
             bar.set_thresholds(warn, danger)
+        if self._edge_hidden:
+            self.update()  # 尾巴上的线段颜色也随阈值变;进度条被藏了,它得自己重画
         self._retarget(animate=False)
 
     def set_thresholds(self, *, warn: float, lit: float, danger: float) -> None:
@@ -843,12 +1019,14 @@ class StatusBarWindow(QWidget):
             current["danger"],
         )
 
-    def current_setting(self, key: str) -> float:
+    def current_setting(self, key: str) -> float | bool:
         """某个可还原项的当前生效值(对话框与执行都用它,免得两处各写一套取法)。"""
         if key == "idle_opacity":
             return self._idle_opacity
         if key == "refresh_seconds":
             return self._refresh_seconds
+        if key == EDGE_HIDE_KEY:
+            return self._edge_hide
         return self.thresholds[key.removesuffix("_threshold")]
 
     def resettable_diff(self) -> list[tuple[str, str, str]]:
@@ -879,6 +1057,8 @@ class StatusBarWindow(QWidget):
             self.set_idle_opacity(targets["idle_opacity"])
         if "refresh_seconds" in targets:
             self.set_refresh_seconds(targets["refresh_seconds"])
+        if EDGE_HIDE_KEY in targets:
+            self.set_edge_hide(bool(targets[EDGE_HIDE_KEY]))
         wanted = self.thresholds
         for key in ("warn_threshold", "danger_threshold", "lit_threshold"):
             if key in targets:
@@ -920,6 +1100,8 @@ class StatusBarWindow(QWidget):
         self.setToolTip(summary)
         self.updated.emit(summary)  # 托盘图标靠它同步悬停提示
         self._retarget()
+        if self._edge_hidden:
+            self.update()  # 尾巴上的小线段跟着数据走:进度条被藏了,刷新得自己重画
         # target 是同步算出的终值(动画还在跑时它也已确定),所以断言提亮结果不必等动画
         log.debug(
             "event=refresh max_ratio=%.4f level=%.2f target=%.2f %s",
@@ -967,24 +1149,53 @@ class StatusBarWindow(QWidget):
         """
         self._level = float(value)
         alpha = lerp(self._idle_opacity, LIVE_OPACITY, self._level) * 255
+        self._tail_alpha = alpha
         for bar in self._bars:
             bar.set_alpha(alpha)
+        if self._edge_hidden:
+            self.update()  # 尾巴形态下进度条不可见:变亮得自己重画一次
 
     # ---- 鼠标悬停唤醒:硬切,移开立即还原 ----
     def enterEvent(self, event) -> None:
         self._hovered = True
         log.debug("event=hover state=enter")
         self._retarget(animate=False)
+        # 收成尾巴时,指针蹭到尾巴就长回来 —— 这就是"贴边自动隐藏"的唤醒入口
+        self.show_handle_view()
 
     def leaveEvent(self, event) -> None:
         self._hovered = False
         log.debug("event=hover state=leave")
         self._retarget(animate=False)
+        if self._edge is not None and not self._edge_sliding:
+            # 延迟收起:没有它,光标划过屏幕边缘会带着窗口来回弹。
+            # 形变期间不收:窗口自己在动,Qt 会跟着补一个 Leave ——
+            # 不管它的话,刚蹭出来的窗口会立刻又被排上收起(实测就是这个"反着来"的现象)。
+            self._edge_timer.start()
 
-    # ---- 绘制:只画一层隐形矩形,让整个窗口都能接收鼠标 ----
+    # ---- 绘制:隐形命中层;尾巴形态再补上小尾巴本身 ----
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0, HIT_AREA_ALPHA))
+        if self._edge_hidden:
+            self._paint_tail(painter)
+
+    def _paint_tail(self, painter: QPainter) -> None:
+        """尾巴:**一条断线**,一段表示一个盘(每段长度固定、颜色随阈值、整条线平行于屏幕边)。
+
+        没有底板也没有描边 —— 因此窗口那一层隐形矩形(见 `paintEvent`)仍是唯一的命中来源,别动它;
+        线只有 2px 粗,能蹭到全靠那层矩形。
+
+        按 `tail_layout` 给的尺寸画,再让画布缩放到**当前窗口大小** —— 收起途中窗口一直在缩,
+        同一段代码顺带画出了"缩成一条"的过程;停稳时两者相等,缩放正好是 1,像素对齐。方向
+        (横 / 竖)由布局给,这里没有分支。
+        """
+        painter.setRenderHint(QPainter.Antialiasing)
+        width, height, lines = tail_layout(self._edge or "top", len(self._bars))
+        painter.scale(self.width() / max(1, width), self.height() / max(1, height))
+        alpha = max(self._tail_alpha, TAIL_MIN_ALPHA)
+        for (x, y, w, h), bar in zip(lines, self._bars, strict=False):
+            painter.fillRect(QRectF(x, y, w, h), with_alpha(bar.status_rgb(), alpha))
 
     # ---- 鼠标穿透:开启后事件直接落到桌面,不能拖动、不能悬停 ----
     def set_click_through(self, enabled: bool) -> None:
@@ -997,6 +1208,9 @@ class StatusBarWindow(QWidget):
         self._retarget(animate=False)
         # 开启后只能从托盘关掉,日志里必须留下这一笔,否则"窗口怎么点都没反应"查不出来
         log.info("event=click_through enabled=%s", enabled)
+        if enabled and self._edge_hide:
+            # 穿透开着窗口收不到任何鼠标事件,贴边必然失效 —— 两者互斥,这里直接把贴边关掉
+            self.set_edge_hide(False)
 
     def reveal(self) -> None:
         """把小组件叫出来(第二个实例启动时用,见 `single_instance.py`)。
@@ -1008,7 +1222,21 @@ class StatusBarWindow(QWidget):
         if not self.isVisible():
             self.show()
             log.info("event=window state=shown reason=second_instance")
+        self.show_handle_view()  # 收起成尾巴时也要长回来:叫它就是让人看见它
         self.raise_()  # 置顶窗口之间的次序:确保它不在别的窗口后面
+
+    def showEvent(self, event) -> None:
+        """显示时:贴着边的就展开,指针不在上面就重新排上收起。
+
+        启动路径就是走这里:窗口构造完才 `show()`,所以"重启后接着贴边"的定时器必须在这里排
+        (`__init__` 里排会被这次 `show()` 清掉)。
+        """
+        super().showEvent(event)
+        self.show_handle_view()
+        # 只决定要不要排收起,**不动悬停态**:刚 show 出来的窗口还没收到 Enter,悬停由事件负责
+        # (重判悬停那套见 `_settle_edge`)。
+        if self._edge is not None and not self._cursor_on_window():
+            self._edge_timer.start()
 
     # ---- 隐藏:恢复入口只有托盘 ----
     def hide_widget(self) -> None:
@@ -1017,6 +1245,238 @@ class StatusBarWindow(QWidget):
         self._retarget(animate=False)
         self.hide()
         log.info("event=window state=hidden")
+
+    # ---- 贴边隐藏:贴住边就折叠成小尾巴,指针蹭到尾巴再长回来 ----
+    def _read_edge_hide(self) -> bool:
+        """读"贴边隐藏"开关:非法值退回默认并留痕(与其它配置项同一套做法)。"""
+        raw = self._settings.value(EDGE_HIDE_KEY, EDGE_HIDE_DEFAULT)
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+        log.warning("event=config_invalid key=%s fallback=%s", EDGE_HIDE_KEY, EDGE_HIDE_DEFAULT)
+        return EDGE_HIDE_DEFAULT
+
+    @property
+    def edge_hide(self) -> bool:
+        """贴边隐藏开关(托盘那个勾选,也是 ini 里 `edge_hide` 的值)。"""
+        return self._edge_hide
+
+    @property
+    def edge(self) -> str | None:
+        """当前贴在哪条边(left / right / top / bottom);没贴边是 None。"""
+        return self._edge
+
+    @property
+    def edge_hidden(self) -> bool:
+        """此刻是否是尾巴形态(收起途中也算)。"""
+        return self._edge_hidden
+
+    def full_size(self) -> QSize:
+        """展开形态的尺寸(当前缩放下的)—— 用例与形变目标都用它,不另推一遍。"""
+        return layout_size(self._ui_scale, len(self._bars) or len(DRIVES))
+
+    def tail_size(self, edge: str | None = None) -> QSize:
+        """尾巴尺寸:**固定的设备像素**,不随主界面缩放变(那是展开形态的事)。
+
+        `edge` 决定线的方向(见 `tail_layout`),默认用当前贴着的那条边;没贴边时按横线那套算。
+        """
+        rows = len(self._bars) or len(DRIVES)
+        width, height, _ = tail_layout(edge or self._edge or "top", rows)
+        return QSize(width, height)
+
+    def set_edge_hide(self, enabled: bool) -> None:
+        """提交开关:落盘 + 一条日志;开启时立刻按当前位置判定一次,关闭时立刻退出贴边。"""
+        self._edge_hide = enabled
+        self._settings.setValue(EDGE_HIDE_KEY, enabled)
+        self._settings.sync()
+        log.info("event=edge_hide enabled=%s", enabled)
+        if enabled:
+            self.snap_to_edge()
+        else:
+            self.leave_edge()
+
+    def _screen_bounds(self) -> tuple[int, int, int, int] | None:
+        """窗口所在屏幕的工作区,换成**左下开区间**口径(`snap_edge` / `tail_pos` 用这个口径)。
+
+        用工作区而不是整块屏幕:底边自动避开任务栏,贴上去才真的蹭得到。
+        """
+        screen = QApplication.screenAt(self.frameGeometry().center()) or (
+            QApplication.primaryScreen()
+        )
+        if screen is None:
+            return None
+        area = screen.availableGeometry()
+        return (area.left(), area.top(), area.right() + 1, area.bottom() + 1)
+
+    def _expand_now(self, position: QPoint | None = None) -> None:
+        """立刻回到展开形态(不补间):尺寸、子控件可见性、位置一次到位。
+
+        "立刻"是刻意的:判定贴边(要量展开矩形)、按尾巴开始拖动、关掉开关,这些都在用户手上,
+        补间会让这几步对不上量到的尺寸。
+        """
+        self._edge_anim.stop()
+        self._edge_sliding = False
+        self._edge_hidden = False
+        self.setFixedSize(self.full_size())
+        for bar in self._bars:
+            bar.show()
+        if position is not None:
+            self.move(position)
+
+    def snap_to_edge(self) -> None:
+        """按当前位置判定贴哪条边:够近就吸附齐平,不够近就退出贴边(拖动结束、开关打开时调)。
+
+        判定要用**展开矩形**:一是量尺寸(尾巴只有十几像素,量不出"贴哪条边"),二是量位置。
+        位置分两种情形,拿错一种就会把用户的操作撤销掉:
+
+        - 拖动松手时:窗口已经在用户放下的位置 —— **就地**展开,绝不搬回旧锚点(搬回去之后再判,
+          量到的是屏幕边,判定结果就不再是用户放下的位置了);
+        - 收在尾巴里时:窗口的位置是尾巴的,得先长回锚点(那才是展开位置)。
+
+        压出屏幕的那部分也算贴上(见 `snap_edge`),所以"拖出去一半松手"会被拉回边上摆正。
+        """
+        self._expand_now(self._edge_anchor if self._edge_hidden else None)
+        bounds = self._screen_bounds()
+        if bounds is None:
+            return
+        edge = snap_edge(self.x(), self.y(), self.width(), self.height(), bounds)
+        if edge is None:
+            self.leave_edge(keep_position=True)  # 已经拖离屏幕边:窗口留在放下的位置
+            return
+        if edge == "left":
+            anchor = QPoint(bounds[0], self.y())
+        elif edge == "right":
+            anchor = QPoint(bounds[2] - self.width(), self.y())
+        elif edge == "top":
+            anchor = QPoint(self.x(), bounds[1])
+        else:
+            anchor = QPoint(self.x(), bounds[3] - self.height())
+        self._edge = edge
+        self._edge_anchor = anchor
+        self._edge_timer.stop()
+        self.move(anchor)
+        log.info("event=edge_snap edge=%s x=%d y=%d", edge, anchor.x(), anchor.y())
+
+    def leave_edge(self, *, keep_position: bool = False) -> None:
+        """退出贴边:取消定时器、长回展开形态、清干净状态(没贴边时什么也不做)。
+
+        `keep_position=True` 用于"窗口已经被拖到别处"的场合(松手时判成不贴边):位置要留在用户
+        放下的地方 —— 搬回旧锚点就是把这趟拖动撤销掉。开关关掉时相反:窗口该回到贴边的展开位置。
+        """
+        self._edge_timer.stop()
+        if self._edge is None:
+            return
+        self._edge = None
+        self._expand_now(None if keep_position else self._edge_anchor)
+        log.debug("event=edge_hide state=off")
+
+    def show_handle_view(self) -> None:
+        """从尾巴状态长回展开形态(指针蹭到尾巴、或第二个实例把窗口叫出来时调)。"""
+        self._edge_timer.stop()
+        if not self._edge_hidden:
+            return
+        self._edge_hidden = False
+        for bar in self._bars:
+            bar.show()  # 先显示:窗口在长大的过程中会把它们一点点露出来
+        self._morph_to(self._edge_anchor, self.full_size())
+        log.debug("event=edge_hide state=shown edge=%s", self._edge)
+
+    def _hide_to_edge(self) -> None:
+        """收起:折叠成贴着屏幕边的尾巴。指针还在窗口上、或正在拖动时不动(否则会跟用户抢)。"""
+        if (
+            self._edge is None
+            or self._edge_hidden
+            or self._hovered
+            or self._drag_offset is not None
+        ):
+            return
+        bounds = self._screen_bounds()
+        if bounds is None:
+            return
+        tail = self.tail_size(self._edge)  # 方向随边:贴左/右是竖线段
+        full = self.full_size()
+        target = tail_pos(
+            self._edge,
+            self._edge_anchor.x(),
+            self._edge_anchor.y(),
+            full.width(),
+            full.height(),
+            tail.width(),
+            tail.height(),
+            bounds,
+        )
+        self._edge_hidden = True
+        for bar in self._bars:
+            bar.hide()  # 尾巴里没有进度条的位置,那点地方只放得下小线段
+        self._morph_to(QPoint(*target), tail)
+        log.debug("event=edge_hide state=hidden edge=%s", self._edge)
+
+    def _morph_to(self, target: QPoint, size: QSize) -> None:
+        """在展开形态与尾巴之间补间:位置与尺寸同时插值(与提亮共用 QVariantAnimation 那一套)。"""
+        self._edge_start = self.pos()
+        self._edge_target = QPoint(target)
+        self._edge_start_size = self.size()
+        self._edge_target_size = QSize(size)
+        self._edge_anim.stop()
+        self._edge_sliding = True
+        self._edge_anim.setStartValue(0.0)
+        self._edge_anim.setEndValue(1.0)
+        self._edge_anim.start()
+
+    def _morph_done(self) -> None:
+        """形变完了:窗口已停稳,于是按光标的**实际位置**重判一次(`_settle_edge`)。
+
+        必须补这一下:形变期间来的 Leave 是被跳过的(见 `leaveEvent` —— 窗口自己在动,Qt 会
+        补发假的 Leave),可用户若在那 250ms 里就把鼠标移开了,那个 Leave 就是**真的** ——
+        跳掉之后没有任何事件会再来,窗口会一直展开着。
+        """
+        self._edge_sliding = False
+        self._settle_edge()
+
+    def _cursor_on_window(self) -> bool:
+        """光标此刻是否落在窗口上 —— "悬停 / 该不该收起"这类判定的唯一依据。"""
+        return self.rect().contains(self.mapFromGlobal(QCursor.pos()))
+
+    def _settle_edge(self) -> None:
+        """按光标的**实际位置**重判悬停,并决定要不要(重新)排上收起 —— 贴边这件事只认这条判据。
+
+        这几处都走它,共同点是"窗口刚被挪过 / 变过,此刻的 Enter / Leave 未必作数":
+        形变结束(`_morph_done`)、拖动松手、右键菜单关闭、缩放提交(`set_ui_scale` —— 调整尺寸
+        期间窗口是**暂时展开**的,结束之后得自己收回去)。菜单弹出期间窗口收不到鼠标事件,窗口
+        自己动时 Qt 还会补发假的 Leave,所以不能指望事件。
+        """
+        if not self.isVisible():
+            return  # 已经藏起来的窗口收不到 Enter / Leave,不能碰它的悬停态(见 contextMenuEvent)
+        self._hovered = self._cursor_on_window()
+        self._retarget(animate=False)
+        if self._edge is not None and not self._hovered and not self._edge_sliding:
+            self._edge_timer.start()
+
+    def _morph_step(self, value) -> None:
+        """动画每帧回调:按进度在起点与终点之间插值(位置与尺寸一起动)。"""
+        progress = float(value)
+        self.setFixedSize(
+            max(
+                1,
+                round(
+                    lerp(self._edge_start_size.width(), self._edge_target_size.width(), progress)
+                ),
+            ),
+            max(
+                1,
+                round(
+                    lerp(self._edge_start_size.height(), self._edge_target_size.height(), progress)
+                ),
+            ),
+        )
+        self.move(
+            round(lerp(self._edge_start.x(), self._edge_target.x(), progress)),
+            round(lerp(self._edge_start.y(), self._edge_target.y(), progress)),
+        )
 
     # ---- 整窗缩放(托盘「调整尺寸」滑杆)----
     def _read_ui_scale(self) -> float:
@@ -1045,8 +1505,13 @@ class StatusBarWindow(QWidget):
         self.apply_scale(scale)
 
     def set_ui_scale(self, scale: float) -> None:
-        """提交缩放:落盘 + 一条 `event=ui_scale`(滑杆松手 / 菜单关闭时调)。"""
+        """提交缩放:落盘 + 一条 `event=ui_scale`(滑杆松手 / 菜单关闭时调)。
+
+        提交即"调整结束":顺手按光标位置重新判一次贴边(`_settle_edge`)—— 拖动期间窗口是
+        **暂时展开**的(用户正在调大小,看得见才好对齐),收着的那份得在结束之后自己收回去。
+        """
         self.preview_ui_scale(scale)
+        self._settle_edge()
         if self._ui_scale == self._saved_ui_scale:
             return
         self._saved_ui_scale = self._ui_scale
@@ -1056,12 +1521,12 @@ class StatusBarWindow(QWidget):
 
     def apply_scale(self, scale: float) -> None:
         """按系数重排整窗:窗口尺寸、每个盘条的位置与高度、绘制变换都乘它。"""
-        pad = round(PAD * scale)
-        gap = round(GAP * scale)
-        row_h = max(1, round(ROW_H * scale))
-        width = max(1, round(WINDOW_W * scale))
-        rows = len(self._bars)
-        self.setFixedSize(width, pad * 2 + row_h * rows + gap * (rows - 1))
+        pad, gap, row_h, width = scaled_layout(scale, len(self._bars) or len(DRIVES))
+        self.setFixedSize(layout_size(scale, len(self._bars) or len(DRIVES)))
+        if self._edge is not None:
+            # 尺寸变了:齐平位置与尾巴大小都要重算。`snap_to_edge` 会先长回展开形态再判 ——
+            # 用户正在调大小,看得见才好对齐(贴边的标记只有十几像素,量不出贴哪条边)。
+            self.snap_to_edge()
         for index, bar in enumerate(self._bars):
             bar.setGeometry(pad, pad + index * (row_h + gap), width - pad * 2, row_h)
             bar.set_scale(scale)
@@ -1069,9 +1534,15 @@ class StatusBarWindow(QWidget):
 
     # ---- 拖动 ----
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
-            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
+        if event.button() != Qt.LeftButton:
+            return
+        if self._edge_hidden:
+            # 按尾巴 = 要挪动它:立刻长回展开形态再照常拖 —— 否则会拖着一条小线段跑,
+            # 而且拖动偏移量是相对尾巴算的,一动就对不上。
+            self._expand_now(self._edge_anchor)
+            self._edge_timer.stop()
+        self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         if self._drag_offset is not None and event.buttons() & Qt.LeftButton:
@@ -1081,7 +1552,14 @@ class StatusBarWindow(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         if self._drag_offset is not None:
             self._drag_offset = None
+            # 先按当前位置判定贴边(吸附会顺手把位置改成与屏幕边齐平),再存盘 ——
+            # 存的是**展开位置**,否则重启后窗口会"少一截"。
+            if self._edge_hide:
+                self.snap_to_edge()
             self._save_position()
+            # 松手时指针未必还在窗口上(拖出去一半再松手,窗口被拉回边上摆正,指针就落在窗口外):
+            # 这时不会再有 Leave 事件进来,得按光标位置重新判一次
+            self._settle_edge()
 
     # ---- 右键菜单:无标题条,隐藏 / 刷新 / 退出都在这里 ----
     def contextMenuEvent(self, event) -> None:
@@ -1095,18 +1573,12 @@ class StatusBarWindow(QWidget):
         menu.triggered.connect(lambda action: log.info("event=menu item=%s", action.text()))
         menu.exec(event.globalPos())
 
-        # 菜单是 popup,弹出期间窗口收不到 enter / leave 事件。
-        # 所以关掉后必须按光标实际位置重新判定,否则鼠标已经移开了却仍算悬停,
-        # 窗口会一直停在最亮(而且要等下次重新进入再离开才能恢复)。
-        #
-        # 但选中的若是"隐藏",窗口此刻已经不在了:菜单就弹在窗口矩形内,隐藏后光标"还在窗口上",
-        # 按位置重判会把 _hovered 又置回 True、把亮度拉满,而窗口已隐藏、不会再有 Enter / Leave
-        # 来清它 —— 从托盘显示出来就是全亮的(实测:event=window state=hidden 紧接着
-        # event=reveal target=1.00 reason=hover)。隐藏路径自己已经清干净悬停态(见 hide_widget),
-        # 所以这里不能碰一个不在屏幕上、也收不到鼠标的窗口。
-        if self.isVisible():
-            self._hovered = self.rect().contains(self.mapFromGlobal(QCursor.pos()))
-            self._retarget(animate=False)
+        # 菜单是 popup,弹出期间窗口收不到 enter / leave 事件,所以关掉后必须按光标实际位置重判
+        # (否则鼠标已经移开了却仍算悬停,窗口会一直停在最亮)。选中的若是"隐藏",窗口此刻已经
+        # 不在了 —— 那种窗口不能碰:它在窗口矩形内收不到鼠标,重判会让它带着"悬停全亮"被显示
+        # 出来(实测:event=window state=hidden 紧接着 event=reveal target=1.00 reason=hover);
+        # `_settle_edge` 里的 `isVisible()` 就是挡这一下的。
+        self._settle_edge()
 
 
 class MenuRow(QWidget):
@@ -1179,6 +1651,11 @@ class TrayIcon(QSystemTrayIcon):
         self._autostart.toggled.connect(self._set_autostart)
         self._add_row("开机自启", self._autostart, "开机自启", self._autostart.toolTip())
 
+        self._edge_hide = QCheckBox(self._menu)
+        self._edge_hide.setToolTip("贴到屏幕边就收起成一个小尾巴;鼠标蹭到它就长回来")
+        self._edge_hide.toggled.connect(window.set_edge_hide)
+        self._add_row("贴边隐藏", self._edge_hide, "贴边隐藏", self._edge_hide.toolTip())
+
         # 「还原配置」不常用:紧跟着两个开关放,不占贴近「退出」的那段常用区
         self._add_reset_row(window)
 
@@ -1248,6 +1725,11 @@ class TrayIcon(QSystemTrayIcon):
         self._autostart.blockSignals(True)  # 同上,避免回环
         self._autostart.setChecked(is_autostart_enabled())
         self._autostart.blockSignals(False)
+
+        # 贴边隐藏:以窗口的实际状态为准(开穿透时它会被自动关掉,勾选要跟着变)
+        self._edge_hide.blockSignals(True)
+        self._edge_hide.setChecked(self._window.edge_hide)
+        self._edge_hide.blockSignals(False)
 
     def _add_row(
         self,

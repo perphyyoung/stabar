@@ -279,6 +279,7 @@ def test_menu_items_and_order(tray) -> None:
         "",  # 分隔线:上面两行是"关于 / 自检",下面是操作
         "鼠标穿透",  # 勾选项放最上:不容易误触
         "开机自启",
+        "贴边隐藏",  # 同上一行:行内右侧复选框
         "还原配置",  # 不常用:紧跟着勾选项,不占贴近"退出"的常用区(按钮那一行)
         "刷新频率",  # 步进器那一行(QWidgetAction;控件本身在屏幕上另有文字)
         "橙色阈值",  # 步进器,同上
@@ -438,6 +439,30 @@ def test_scale_slider_matches_window_value(window, tray, tmp_path) -> None:
 
     tray._commit_scale()  # 松手:落盘
     assert "ui_scale=0.8" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+
+
+def test_tray_scale_commit_lets_the_window_collapse_again(window, tray, qtbot) -> None:
+    """调整尺寸的完整链路:拖动期间窗口**暂时展开**,松手提交之后自己收回去。
+
+    窗口侧那条在 `test_window.py::test_committing_ui_scale_re_arms_the_collapse`,这里钉的是
+    托盘→窗口这段接线(滑杆松手、菜单关闭都走 `_commit_scale`)。没有它,收着的窗口被调过一次
+    大小就再也收不回去:菜单弹出期间窗口收不到鼠标事件,没人会再判一次。
+    """
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left(), area.top() + 200)
+    window.set_edge_hide(True)
+    window._hide_to_edge()
+    qtbot.waitUntil(lambda: window.size() == window.tail_size(), timeout=1000)
+
+    tray._scale_slider.setValue(120)  # 拖动:窗口暂时展开(看得见才好对齐)
+    assert window.edge_hidden is False
+
+    tray._commit_scale()  # 松手 / 菜单关闭:调整结束
+    qtbot.waitUntil(
+        lambda: window.size() == window.tail_size(),
+        timeout=main.EDGE_HIDE_DELAY_MS + 2000,
+    )
 
 
 def test_opacity_slider_matches_window_value(window, tray) -> None:

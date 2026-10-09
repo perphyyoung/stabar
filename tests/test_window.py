@@ -10,6 +10,7 @@ from e2e_support import (
 )
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QColor
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import main
@@ -170,6 +171,180 @@ def test_hit_layer_covers_whole_rect(window) -> None:
     assert image.pixelColor(3, 31).alpha() == main.HIT_AREA_ALPHA
 
 
+def test_edge_hide_snaps_collapses_to_a_tail_and_grows_back(window, qtbot) -> None:
+    """贴边隐藏:吸附齐平 → 指针离开折叠成小尾巴 → 蹭到尾巴再长回来。
+
+    收起与展开都是**窗口矩形**的事(位置 + 尺寸),所以断言的落点是窗口矩形这个外部事实,不是日志。
+    """
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left() + main.EDGE_SNAP_PX - 1, area.top() + 120)  # 离左边一格以内
+    window.set_edge_hide(True)
+
+    assert window.edge == "left"
+    assert window.x() == area.left()  # 吸附成与屏幕边齐平
+    assert window.edge_hidden is False
+    assert window.size() == window.full_size()  # 此刻是展开形态
+
+    # 指针离开 → 延迟之后折叠成尾巴(必须真派发 Leave:收起是由它启动的定时器触发的)
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Leave))
+    qtbot.waitUntil(lambda: window.edge_hidden, timeout=main.EDGE_HIDE_DELAY_MS + 1000)
+    tail = window.tail_size()
+    qtbot.waitUntil(lambda: window.size() == tail, timeout=1000)
+    assert window.x() == area.left()  # 尾巴整块留在屏幕内(命中规则见 README 必读第 2 条)
+    assert area.top() <= window.y() and window.y() + tail.height() <= area.bottom() + 1
+
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Enter))  # 蹭到尾巴
+    qtbot.waitUntil(lambda: window.size() == window.full_size(), timeout=1000)
+    assert window.x() == area.left()  # 长回锚点
+    assert window.edge_hidden is False
+
+    window.set_edge_hide(False)
+    assert window.edge is None  # 关掉开关就退出贴边
+
+
+def test_edge_hide_grabs_a_half_off_screen_drag(window, qtbot) -> None:
+    """拖出去一半(压出屏幕)也算贴上这条边:松手拉回边上摆正,并照常收起成尾巴。"""
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left() - window.width() // 2, area.top() + 100)  # 一半在屏幕外
+    window.set_edge_hide(True)
+
+    assert window.edge == "left"
+    assert window.x() == area.left()  # 拉回屏幕内、与边齐平
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Leave))
+    qtbot.waitUntil(lambda: window.edge_hidden, timeout=main.EDGE_HIDE_DELAY_MS + 1000)
+    qtbot.waitUntil(lambda: window.size() == window.tail_size(), timeout=1000)
+    assert window.x() == area.left()  # 尾巴在屏幕内:压出去的窗口不会被拖丢
+
+
+def test_tail_is_taller_sideways_and_flatter_top_bottom(window, qtbot) -> None:
+    """线段朝向的可见后果:贴左/右时尾巴是**竖**的(高 > 宽),贴上/下时是横的(宽 > 高)。
+
+    方向本身由 `main.tail_layout` 决定(第 1 层钉着),这里钉的是窗口真的按那条边取对了尺寸。
+    """
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+
+    window.move(area.left(), area.top() + 200)  # 贴左
+    window.set_edge_hide(True)
+    assert window.edge == "left"
+    sideways = window.tail_size()
+    assert sideways.height() > sideways.width()  # 竖线:尾巴竖着
+
+    window.set_edge_hide(False)
+    window.move(area.left() + 200, area.top())  # 贴上
+    window.set_edge_hide(True)
+    assert window.edge == "top"
+    flat = window.tail_size()
+    assert flat.width() > flat.height()  # 横线:尾巴横着
+    assert sideways.width() == flat.height()  # 就是把同一条线转 90°
+
+
+def test_tail_size_is_fixed_and_ignores_the_ui_scale(window, qtbot) -> None:
+    """贴边后是**固定大小**:「调整尺寸」管的是展开形态,不该让贴边的标记跟着变粗变长。"""
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left(), area.top() + 200)
+    window.set_edge_hide(True)
+
+    before = window.tail_size()
+    window.set_ui_scale(2.0)
+    assert window.tail_size() == before
+    window.set_ui_scale(main.UI_SCALE_MIN)
+    assert window.tail_size() == before
+    # 展开形态仍然跟着缩放走(它才是"调整尺寸"的作用对象)
+    assert window.full_size().width() == round(main.WINDOW_W * main.UI_SCALE_MIN)
+
+
+def test_committing_ui_scale_re_arms_the_collapse(window, qtbot) -> None:
+    """托盘「调整尺寸」:拖动期间窗口**暂时展开**,提交(松手 / 关菜单)之后要重新判断该不该收起。
+
+    没有这一步,收着的窗口被调过一次大小就会一直展开着:菜单弹出期间它收不到鼠标事件,
+    没人会再判一次。
+    """
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left(), area.top() + 200)
+    window.set_edge_hide(True)
+    window._hide_to_edge()
+    qtbot.waitUntil(lambda: window.size() == window.tail_size(), timeout=1000)
+
+    window.preview_ui_scale(1.5)  # 拖动中:暂时展开(看得见才好对齐)
+    assert window.edge_hidden is False
+    assert window.size() == window.full_size()
+    assert not window._edge_timer.isActive()  # 拖的时候不该收起
+
+    window.set_ui_scale(1.5)  # 松手提交 = 调整结束
+    assert window._edge_timer.isActive()  # 光标不在窗口上 → 重新排上收起
+    qtbot.waitUntil(
+        lambda: window.size() == window.tail_size(), timeout=main.EDGE_HIDE_DELAY_MS + 2000
+    )
+    assert window.edge_hidden is True
+
+
+def test_tail_keeps_a_hittable_layer(window, qtbot) -> None:
+    """尾巴必须整块有 alpha ≥ 1:否则鼠标穿透到桌面,收起来之后再也蹭不回来(README 必读第 2 条)。"""
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left(), area.top() + 100)
+    window.set_edge_hide(True)
+    window._hide_to_edge()  # 直接收起:绕过 250ms 的延迟
+    qtbot.waitUntil(lambda: window.size() == window.tail_size(), timeout=1000)
+
+    image = window.grab().toImage()  # 尾巴里没有底板:整块可见像素就靠这层隐形矩形撑着
+    assert image.pixelColor(image.width() // 2, image.height() // 2).alpha() >= main.HIT_AREA_ALPHA
+
+
+def test_leaving_while_morphing_still_collapses(window, qtbot) -> None:
+    """展开动画还没跑完就把鼠标移开:形变结束时必须按光标**实际位置**补判一次。
+
+    形变期间的 Leave 是被跳过的(窗口自己在动,Qt 会补发假的 Leave);跳掉的那个若是真 Leave,
+    之后就再没有事件可来,窗口会一直展开着。
+    """
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left(), area.bottom() - window.height() - 50)  # 右下区域:离离屏光标很远
+    window.set_edge_hide(True)
+    window._hide_to_edge()
+    qtbot.waitUntil(lambda: window.size() == window.tail_size(), timeout=1000)
+
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Enter))  # 蹭到尾巴 → 开始展开
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Leave))  # 动画还没停就把鼠标移开
+    qtbot.waitUntil(lambda: window.edge_hidden, timeout=main.EDGE_HIDE_DELAY_MS + 2000)
+
+
+def test_pressing_the_tail_expands_it_for_dragging(window) -> None:
+    """按尾巴 = 要挪动它:立刻长回展开形态(不补间),否则会拖着一条小线段跑。"""
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left(), area.top() + 100)
+    window.set_edge_hide(True)
+    window._hide_to_edge()
+    assert window.edge_hidden is True
+
+    QTest.mousePress(window, Qt.LeftButton, pos=main.QPoint(2, 2))
+    try:
+        assert window.edge_hidden is False
+        assert window.size() == window.full_size()  # 一次到位,不是补间到一半
+    finally:
+        QTest.mouseRelease(window, Qt.LeftButton, pos=main.QPoint(2, 2))
+
+
+def test_edge_hide_is_on_by_default_and_yields_to_click_through(window, tmp_path) -> None:
+    """默认开(贴到边就收起);开鼠标穿透时会被自动关掉(穿透后收不到任何鼠标,**物理上**互斥)。"""
+    assert window.edge_hide is True
+    assert window.edge is None  # 默认位置离屏幕边还有一段距离:不贴边
+
+    window.set_edge_hide(False)
+    assert "edge_hide=false" in (tmp_path / main.SETTINGS_NAME).read_text(encoding="utf-8")
+
+    window.set_edge_hide(True)
+    window.set_click_through(True)
+    assert window.edge_hide is False  # 穿透把它关了
+    assert window.edge is None
+
+
 def test_config_is_written_back_on_first_run(window) -> None:
     """启动回写让配置文件自解释:没有这个键时补上生效值。"""
     path = main.settings_path()
@@ -180,7 +355,11 @@ def test_config_is_written_back_on_first_run(window) -> None:
 def test_out_of_screen_position_is_clamped(
     qtbot, tmp_path, monkeypatch, low_usage, fake_registry
 ) -> None:
-    """换过显示器后越界的坐标要被夹回屏幕内,否则窗口会跑到看不见的地方。"""
+    """换过显示器后越界的坐标要被夹回屏幕内,否则窗口会跑到看不见的地方。
+
+    贴边隐藏默认开着,所以夹到右下角之后它还会顺手吸附成与边齐平(比夹取的位置更贴一格)——
+    这里要钉的是"整块都在工作区内"这个不变量。
+    """
     ini = tmp_path / "stabar.ini"
     ini.write_text("[General]\npos_x=999999\npos_y=999999\n", encoding="utf-8")
     monkeypatch.setattr(main, "settings_path", lambda: ini)
@@ -189,5 +368,6 @@ def test_out_of_screen_position_is_clamped(
     qtbot.addWidget(window)
 
     area = main.QApplication.primaryScreen().availableGeometry()
-    assert window.x() == area.right() - window.width()
-    assert window.y() == area.bottom() - window.height()
+    assert area.left() <= window.x() and window.x() + window.width() <= area.right() + 1
+    assert area.top() <= window.y() and window.y() + window.height() <= area.bottom() + 1
+    assert window.edge in ("right", "bottom")  # 落在角落:贴着其中一条边
