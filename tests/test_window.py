@@ -34,6 +34,18 @@ def test_hover_details_cover_the_whole_window(window) -> None:
     assert all(bar.testAttribute(Qt.WA_TransparentForMouseEvents) for bar in window._bars)
 
 
+def test_hover_text_has_one_source_and_two_lengths(window) -> None:
+    """悬停提示只有一处实现:窗口用完整明细,托盘用紧凑版(平台只给 128 个字符)。"""
+    assert window.toolTip() == window.summary()  # 窗口上挂的就是完整版
+    assert window.summary() == main.summary_text(window._bars)  # 出处只有 summary_text
+    assert window.summary(compact=True) == main.summary_text(window._bars, compact=True)
+
+    full, compact = window.summary(), window.summary(compact=True)
+    assert "\n" in full and "\n" not in compact  # 完整版多行、紧凑版一行
+    assert all(bar.short_text() in compact for bar in window._bars)
+    assert len(compact) <= main.TRAY_TIP_MAX
+
+
 def test_brightness_only_from_hover_or_thresholds(window, monkeypatch) -> None:
     """非悬停时亮度只有 0/1:橙色阈值只改颜色;到常亮阈值或红色阈值才常亮。"""
     bar = window._bars[0]
@@ -162,6 +174,64 @@ def test_hide_widget_clears_hover_state(window) -> None:
     window.hide_widget()
     assert not window.isVisible()
     assert not window._hovered
+
+
+def test_drive_set_follows_the_detector(window, monkeypatch) -> None:
+    """盘集变了就重建盘条,窗口高度跟着走 —— 插上移动硬盘,它就出现在列表里。"""
+    assert [bar.path for bar in window._bars] == ["C:/", "D:/"]
+
+    monkeypatch.setattr(main, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+    window.refresh()
+
+    assert [bar.path for bar in window._bars] == ["C:/", "D:/", "F:/"]
+    assert window.full_size() == main.layout_size(window.ui_scale, 3)
+
+
+def test_drives_config_limits_what_is_shown(
+    qtbot, tmp_path, monkeypatch, low_usage, fake_registry
+) -> None:
+    """ini 写 `drives=C,D` 就只显示这两个、顺序照写;`auto` 回自动。
+
+    带逗号的值 `QSettings` 会读成**列表**,只认字符串的实现会静默退化成自动(F: 就冒出来了)。
+    """
+    ini = tmp_path / "stabar.ini"
+    ini.write_text("[General]\ndrives=C,D\n", encoding="utf-8")
+    monkeypatch.setattr(main, "settings_path", lambda: ini)
+    monkeypatch.setattr(main, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+
+    window = main.StatusBarWindow()
+    qtbot.addWidget(window)
+
+    assert window.drives == ["C:/", "D:/"]
+    assert [bar.path for bar in window._bars] == ["C:/", "D:/"]  # 没写 F:,不显示
+
+    window.set_drives(["D:/", "C:/"])  # 顺序按写的来
+    assert [bar.path for bar in window._bars] == ["D:/", "C:/"]
+
+    # 落盘的形式由 QSettings 决定(带逗号的值它会加引号),要钉的是**读回来还是这两个、顺序不变**
+    reopened = main.StatusBarWindow()
+    qtbot.addWidget(reopened)
+    assert reopened.drives == ["D:/", "C:/"]
+
+    window.set_drives(None)  # 回自动
+    assert [bar.path for bar in window._bars] == ["C:/", "D:/", "F:/"]
+    assert "drives=auto" in ini.read_text(encoding="utf-8")
+
+
+def test_drive_change_while_collapsed_re_arms_the_collapse(window, qtbot, monkeypatch) -> None:
+    """正收着的时候盘集变了(插上移动硬盘):重建之后要重新判断收起,不能一直摊开着。"""
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left(), area.top() + 200)
+    window.set_edge_hide(True)
+    window._hide_to_edge()
+    qtbot.waitUntil(lambda: window.size() == window.tail_size(), timeout=1000)
+
+    monkeypatch.setattr(main, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+    window.refresh()
+
+    assert len(window._bars) == 3  # 盘条已经是新的
+    qtbot.waitUntil(lambda: window.edge_hidden, timeout=main.EDGE_HIDE_DELAY_MS + 2000)
 
 
 def test_hit_layer_covers_whole_rect(window) -> None:
@@ -353,7 +423,7 @@ def test_config_is_written_back_on_first_run(window) -> None:
 
 
 def test_out_of_screen_position_is_clamped(
-    qtbot, tmp_path, monkeypatch, low_usage, fake_registry
+    qtbot, tmp_path, monkeypatch, low_usage, fake_registry, fake_drives
 ) -> None:
     """换过显示器后越界的坐标要被夹回屏幕内,否则窗口会跑到看不见的地方。
 

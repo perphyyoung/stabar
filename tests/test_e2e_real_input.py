@@ -74,6 +74,8 @@ import main
 BASE = Path(__file__).resolve().parent.parent
 EXE = BASE / "dist" / "stabar" / "stabar.exe"
 TARGET = os.environ.get("STABAR_E2E_TARGET", "exe")  # dev = 跑源码形态,不必打包
+# 每个用例的 ini 都把要显示的盘符钉住:"这台机器插没插移动硬盘"不该决定窗口有几行、尾巴有多长
+DRIVES_INI = "C,D"
 
 pytestmark = [
     pytest.mark.skipif(
@@ -184,7 +186,8 @@ def app(tmp_path):
     """
     area_left, area_top, _, _ = work_area()
     seed_x, seed_y = area_left + main.EDGE_MARGIN, area_top + main.EDGE_MARGIN
-    with launched(tmp_path, f"[General]\npos_x={seed_x}\npos_y={seed_y}\n") as running:
+    ini = f"[General]\npos_x={seed_x}\npos_y={seed_y}\ndrives={DRIVES_INI}\n"
+    with launched(tmp_path, ini) as running:
         left, top, _, _ = rect_of(running.hwnd)
         assert (left, top) == (seed_x, seed_y), (
             f"窗口没落在 ini 指定的位置:期望 {(seed_x, seed_y)} 实际 {(left, top)}"
@@ -322,8 +325,8 @@ def test_real_tray_menu_hides_window(app) -> None:
 
 
 def _edge_tail_size(edge: str = "left") -> tuple[int, int]:
-    """尾巴的尺寸(ini 里没写 ui_scale,所以就是基准像素);方向随边,见 `main.tail_layout`。"""
-    width, height, _ = main.tail_layout(edge, len(main.DRIVES))
+    """尾巴的尺寸(ini 里没写 ui_scale,所以就是基准像素);方向与段数随边,见 `main.tail_layout`。"""
+    width, height, _ = main.tail_layout(edge, len(DRIVES_INI.split(",")))
     return width, height
 
 
@@ -341,7 +344,7 @@ def test_edge_hide_collapses_to_a_tail_then_hover_brings_it_back(tmp_path) -> No
     结论全落在**窗口矩形**这个外部事实上(不看日志)。尾巴必须整块留在屏幕内、且有 alpha ≥ 1 的
     像素:整块跑出屏幕又收不到鼠标的话,收起之后就再也蹭不回来了(命中规则见 README 必读第 2 条)。
     """
-    ini = "[General]\npos_x=0\npos_y=300\nedge_hide=true\n"
+    ini = f"[General]\npos_x=0\npos_y=300\nedge_hide=true\ndrives={DRIVES_INI}\n"
     with launched(tmp_path, ini) as running:
         edge, area_top = work_area()[0], work_area()[1]  # 屏幕左缘(工作区左边界一般是 0)
 
@@ -385,7 +388,9 @@ def test_edge_hide_pulls_back_a_half_off_screen_drag(tmp_path) -> None:
     area_left, area_top, area_right, _ = work_area()
     middle = (area_left + area_right) // 2
     half = main.WINDOW_W // 2
-    ini = f"[General]\npos_x={middle}\npos_y={area_top + 200}\nedge_hide=true\n"
+    ini = (
+        f"[General]\npos_x={middle}\npos_y={area_top + 200}\nedge_hide=true\ndrives={DRIVES_INI}\n"
+    )
     with launched(tmp_path, ini) as running:
 
         def geometry() -> tuple[int, int, int, int]:
@@ -416,7 +421,7 @@ def test_edge_hide_drag_out_from_the_tail_stays_where_dropped(tmp_path) -> None:
     """
     drop_dx, drop_dy = 300, 160
     anchor_y = 300
-    ini = f"[General]\npos_x=0\npos_y={anchor_y}\nedge_hide=true\n"
+    ini = f"[General]\npos_x=0\npos_y={anchor_y}\nedge_hide=true\ndrives={DRIVES_INI}\n"
     with launched(tmp_path, ini) as running:
         edge, area_top = work_area()[0], work_area()[1]
 

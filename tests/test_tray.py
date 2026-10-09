@@ -388,9 +388,10 @@ def test_context_reason_does_not_toggle(window, tray) -> None:
 
 
 def test_tooltip_follows_window_refresh(window, tray) -> None:
-    """托盘悬停提示跟着刷新走,不用等定时器。"""
+    """托盘悬停提示跟着刷新走(不用等定时器),而且用**紧凑版**:平台只给 128 个字符。"""
     window.refresh()
-    assert "已用" in tray.toolTip()
+    assert tray.toolTip() == window.summary(compact=True)
+    assert len(tray.toolTip()) <= main.TRAY_TIP_MAX
 
 
 def test_autostart_checkbox_reflects_registry(window, tray, fake_registry) -> None:

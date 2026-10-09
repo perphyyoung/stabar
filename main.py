@@ -18,12 +18,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import importlib.metadata
 import logging
 import os
 import shutil
 import sys
 import winreg
+from ctypes import wintypes
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -80,7 +82,11 @@ import single_instance
 APP_NAME = "stabar"  # 决定打包后配置目录的名字
 # 版本号**不在这里**:唯一来源是 pyproject.toml 的 [project] version,运行时由 app_version() 读它。
 # 不要为了省一次读文件而在代码里另抄一份 —— 抄了就会有一天忘了同步。
-DRIVES = ("C:/", "D:/")  # 要监控的盘符
+# 要监控的盘符**不写死**:运行时探测(见 detect_drives —— 固定盘 + 可移动盘,含移动硬盘),
+# 配置文件里的 `drives` 可以只挑几个(见 visible_drives)。
+DRIVES_KEY = "drives"
+DRIVES_AUTO = "auto"  # ini 里的"自动";解析后是 None
+MAX_DRIVES = 8  # 显示上限:窗口高度 = 盘数 × 行高,再多就太占屏幕
 REFRESH_MS = 15_000  # 刷新间隔的默认值(毫秒);托盘菜单可改(见 refresh_seconds)
 REFRESH_MIN_S = 1  # 托盘步进器允许的最小秒数
 REFRESH_MAX_S = 60  # 托盘步进器允许的最大秒数
@@ -147,6 +153,10 @@ UI_SCALE_DEFAULT = 1.0
 UI_SCALE_MIN = 0.6  # 再小就看不清了
 UI_SCALE_MAX = 2.0  # 再大就占满屏
 SCALE_UNIT = 0.01  # 滑杆一格 = 1%
+
+# 托盘悬停提示的长度上限:Windows 的 NOTIFYICONDATA.szTip 是 128 个字符的缓冲,超出会被 shell
+# 从中间截掉(实测:三块盘的完整明细约 140 字符,托盘里第三行只剩"可用 2.")。所以托盘用紧凑文字。
+TRAY_TIP_MAX = 127
 
 # --- 托盘菜单 ---
 # 控件行(滑杆 / 开关 / 按钮)没有菜单项那段缩进,要自己补上左边距才能与其它行文字左对齐。
@@ -439,6 +449,7 @@ RESETTABLE_SETTINGS = (
     ("lit_threshold", "常亮阈值", LIT_THRESHOLD, percent_text),
     ("idle_opacity", "未报警透明度", FIRST_RUN_IDLE_OPACITY, percent_text),
     (EDGE_HIDE_KEY, "贴边隐藏", EDGE_HIDE_DEFAULT, lambda value: "开" if value else "关"),
+    (DRIVES_KEY, "显示的盘符", None, lambda value: "自动" if value is None else drives_text(value)),
 )
 
 
@@ -505,6 +516,94 @@ def read_disk(path: str) -> tuple[int, int] | None:
     except OSError:
         return None
     return usage.used, usage.total
+
+
+# --- 盘符探测:哪些盘要显示 ---
+# Win32 的驱动器类型(GetDriveTypeW 的返回值)。**固定盘里就包含 USB 硬盘盒** ——
+# 它报的是 FIXED 而不是 REMOVABLE,所以"要含移动硬盘"靠的是这两个类型一起收。
+DRIVE_REMOVABLE = 2
+DRIVE_FIXED = 3
+KEEP_DRIVE_TYPES = (DRIVE_FIXED, DRIVE_REMOVABLE)
+
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.GetLogicalDriveStringsW.argtypes = (wintypes.DWORD, wintypes.LPWSTR)
+_kernel32.GetLogicalDriveStringsW.restype = wintypes.DWORD
+_kernel32.GetDriveTypeW.argtypes = (wintypes.LPCWSTR,)
+_kernel32.GetDriveTypeW.restype = wintypes.UINT
+
+
+def drive_roots() -> list[str]:
+    """系统里所有已分配盘符的根(形如 "C:/");拿不到就返回空表并留痕。"""
+    size = _kernel32.GetLogicalDriveStringsW(0, None)  # 先问长度,再按长度取
+    if not size:
+        log.warning("event=drives error=GetLogicalDriveStringsW code=%s", ctypes.get_last_error())
+        return []
+    buffer = ctypes.create_unicode_buffer(size + 1)
+    _kernel32.GetLogicalDriveStringsW(size, buffer)
+    return [f"{part[0]}:/" for part in buffer[:size].split("\0") if part]
+
+
+def detect_drives() -> list[str]:
+    """**已加载**的盘符(含移动硬盘):固定盘 + 可移动盘,而且**试读得到**。
+
+    试读那一步是决定性的:空光驱、读卡器无卡、拔掉的盘都会在这里被排除 —— 主界面上不会出现
+    一排永远"不可用"的行,也不必维护"哪些类型要排除"的白名单。
+
+    映射的网络盘先按类型排除:它即使在线,`disk_usage` 也可能卡住几秒,而这一步跑在 UI 线程上
+    (要看网络盘就把字母写进 ini 的 `drives`,那里的代价由配置的人自己承担)。
+    """
+    usable = [
+        root
+        for root in drive_roots()
+        if _kernel32.GetDriveTypeW(root) in KEEP_DRIVE_TYPES and read_disk(root) is not None
+    ]
+    return sorted(usable)
+
+
+def parse_drives(raw: object) -> tuple[list[str] | None, list[str]]:
+    """解析 ini 里的 `drives` →(要显示的盘符 | None = 自动, 被丢掉的非法项)。
+
+    `auto`(默认)或空 → (None, []);`C,E` → (["C:/", "E:/"], []);`C:`、`c:\\`、多余空格都认。
+    写坏的项丢掉,全坏就当自动 —— 一个笔误不该让小组件变成空的。
+
+    ⚠️ **两种形状都要认**:`QSettings` 会把带逗号的值读成**列表**(`drives=C,D` → `["C", "D"]`),
+    只写字符串一种会在"写了两个盘"时静默退化成自动(实测踩到:E2E 里窗口多出一行、尾巴长度对不上)。
+    """
+    if isinstance(raw, (list, tuple)):
+        text = ",".join(str(item) for item in raw).strip()
+    else:
+        text = str(raw).strip()
+    if not text or text.lower() == DRIVES_AUTO:
+        return None, []
+    wanted: list[str] = []
+    dropped: list[str] = []
+    for raw_token in text.replace(";", ",").split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        letter, tail = token[:1].upper(), token[1:]
+        if "A" <= letter <= "Z" and tail in ("", ":", ":/", ":\\"):
+            if letter not in wanted:
+                wanted.append(letter)
+        else:
+            dropped.append(token)
+    return ([f"{letter}:/" for letter in wanted] if wanted else None), dropped
+
+
+def visible_drives(detected: list[str], wanted: list[str] | None) -> list[str]:
+    """最终显示哪些盘:自动就用探测结果,白名单则**按写下的顺序**,两者都只取探测得到的。
+
+    白名单里的盘当场读不到就不显示(不保留一行永远"不可用"的行);超过 `MAX_DRIVES` 取前几个。
+    """
+    if wanted is None:
+        return sorted(detected)[:MAX_DRIVES]
+    detected_set = set(detected)
+    return [root for root in wanted if root in detected_set][:MAX_DRIVES]
+
+
+def drives_text(wanted: list[str] | None) -> str:
+    """把显示集合写成 ini 里的形式:`auto` 或 `C,D`。"""
+    return DRIVES_AUTO if wanted is None else ",".join(root[0] for root in wanted)
 
 
 def human_size(n: float) -> str:
@@ -613,6 +712,11 @@ class DiskBar(QWidget):
         self._scale = UI_SCALE_DEFAULT  # 由窗口下发,见 set_scale
 
     # ---- 数据 ----
+    @property
+    def path(self) -> str:
+        """本行盯着的盘符(形如 "C:/")—— 盘集变化时靠它比对。"""
+        return self._path
+
     def reload(self) -> None:
         self._stats = read_disk(self._path)
         self.update()
@@ -632,6 +736,12 @@ class DiskBar(QWidget):
             f"{self._label}  已用 {human_size(used)} / {human_size(total)}"
             f"  可用 {human_size(total - used)}  ({ratio:.1f}%)"
         )
+
+    def short_text(self) -> str:
+        """同一行的**紧凑**写法:盘符 + 占比 —— 给托盘用(那里的提示有长度上限)。"""
+        if self._stats is None:
+            return f"{self._label} 不可用"
+        return f"{self._label} {self.percent_label()}"
 
     # ---- 观感 ----
     def set_alpha(self, alpha: float) -> None:
@@ -739,10 +849,21 @@ class DiskBar(QWidget):
         )
 
 
+def summary_text(bars: list[DiskBar], *, compact: bool = False) -> str:
+    """悬停提示的文字 —— **只有这一处**:完整版给主界面,紧凑版给托盘。
+
+    托盘的提示有平台上限(见 `TRAY_TIP_MAX`),完整明细会被 Windows 从中间截掉;主界面的
+    tooltip 没有这个限制,所以两种长度各取所需,而文字始终由这里产出。
+    """
+    if compact:
+        return "  ".join(bar.short_text() for bar in bars)
+    return "\n".join(bar.detail_text() for bar in bars)
+
+
 class StatusBarWindow(QWidget):
     """无标题条、无背景的置顶窗口,负责提亮 / 还原与位置持久化。"""
 
-    updated = Signal(str)  # 每次刷新后带出状态文字,供托盘图标的悬停提示使用
+    updated = Signal(str)  # 每次刷新后带出**托盘用**的紧凑状态文字(见 summary_text)
 
     def __init__(self) -> None:
         super().__init__()
@@ -751,13 +872,15 @@ class StatusBarWindow(QWidget):
         # Qt 文档:tooltip 默认只对**活动窗口**显示,而本窗口置顶、从不被激活(真人实测:
         # 详情会时有时无甚至一直不出现)。开了这条,非活动窗口也照常弹详情。
         self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
-        self.setFixedSize(layout_size(UI_SCALE_DEFAULT, len(DRIVES)))
+        self.setFixedSize(layout_size(UI_SCALE_DEFAULT, 1))  # 占位,真实尺寸由 _build_bars 定
 
         self._settings = QSettings(str(settings_path()), QSettings.IniFormat)
         self._drag_offset: QPoint | None = None
         # 整窗缩放:记住生效值;托盘滑杆拖动时只预览,松手 / 关菜单才提交
         self._ui_scale = self._read_ui_scale()
         self._saved_ui_scale = self._ui_scale
+        # 要显示哪些盘:ini 里的 `drives`(None = 自动,用运行时探测结果)
+        self._wanted_drives = self._read_drives()
 
         # 贴边隐藏:只记"贴哪条边 + 展开时的锚点";收起 / 展开只改窗口本身,不动配置。
         # **必须排在下面的 apply_scale() 之前** —— 它会读 `self._edge` 决定要不要重算贴边。
@@ -821,17 +944,7 @@ class StatusBarWindow(QWidget):
         )
 
         self._bars: list[DiskBar] = []
-        for i, path in enumerate(DRIVES):
-            bar = DiskBar(path, self, self._warn_threshold, self._danger_threshold)
-            bar.setGeometry(PAD, PAD + i * (ROW_H + GAP), WINDOW_W - PAD * 2, ROW_H)
-            # 详情文字挂在**窗口**上,而盘条铺满整块区域、自己又不处理 tooltip —— 不给它设这个,
-            # 悬停在盘条上时那条 tooltip 就归盘条(它没有文字 → 不弹),表现为"详情时有时无"。
-            # 让盘条不接收鼠标事件,悬停统一归窗口,整块区域都能弹(不必逐个给子控件设 tooltip)。
-            bar.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self._bars.append(bar)
-
-        # 记住的缩放立刻生效(窗口尺寸 + 每个盘条的位置与高度)
-        self.apply_scale(self._ui_scale)
+        self._refresh_drives(reason="startup", force=True)
 
         self._anim = QVariantAnimation(self)
         self._anim.setDuration(FADE_MS)
@@ -1019,7 +1132,7 @@ class StatusBarWindow(QWidget):
             current["danger"],
         )
 
-    def current_setting(self, key: str) -> float | bool:
+    def current_setting(self, key: str) -> float | bool | list[str] | None:
         """某个可还原项的当前生效值(对话框与执行都用它,免得两处各写一套取法)。"""
         if key == "idle_opacity":
             return self._idle_opacity
@@ -1027,6 +1140,8 @@ class StatusBarWindow(QWidget):
             return self._refresh_seconds
         if key == EDGE_HIDE_KEY:
             return self._edge_hide
+        if key == DRIVES_KEY:
+            return self._wanted_drives
         return self.thresholds[key.removesuffix("_threshold")]
 
     def resettable_diff(self) -> list[tuple[str, str, str]]:
@@ -1045,8 +1160,9 @@ class StatusBarWindow(QWidget):
         """把可还原项恢复成默认:立刻生效 + 落盘,返回被改掉的名字(只含有差异的)。
 
         位置 `pos_x` / `pos_y` **故意不在可还原项里** —— 还原不该把窗口搬走,ini 里始终留着位置。
-        走的是与托盘菜单同一条通道(`set_idle_opacity` / `set_refresh_seconds` / `set_thresholds`),
-        所以不另写一套生效逻辑;三条阈值合成一次提交,免得写出三条 `event=thresholds`。
+        走的是与托盘菜单同一条通道(`set_idle_opacity` / `set_refresh_seconds` / `set_edge_hide` /
+        `set_drives` / `set_thresholds`),所以不另写一套生效逻辑;三条阈值合成一次提交,
+        免得写出三条 `event=thresholds`。
         """
         targets = {
             key: default
@@ -1059,6 +1175,8 @@ class StatusBarWindow(QWidget):
             self.set_refresh_seconds(targets["refresh_seconds"])
         if EDGE_HIDE_KEY in targets:
             self.set_edge_hide(bool(targets[EDGE_HIDE_KEY]))
+        if DRIVES_KEY in targets:
+            self.set_drives(targets[DRIVES_KEY])
         wanted = self.thresholds
         for key in ("warn_threshold", "danger_threshold", "lit_threshold"):
             if key in targets:
@@ -1092,13 +1210,74 @@ class StatusBarWindow(QWidget):
         self._settings.setValue("pos_y", self.y())
         log.debug("event=position_saved x=%d y=%d", self.x(), self.y())
 
+    # ---- 盘集:显示哪些盘 ----
+    def _read_drives(self) -> list[str] | None:
+        """读 ini 的 `drives`:auto(默认)= 用探测结果;写了字母表就是白名单。非法项丢掉并留痕。"""
+        raw = self._settings.value(DRIVES_KEY, DRIVES_AUTO)
+        wanted, dropped = parse_drives(raw)
+        if dropped:
+            log.warning(
+                "event=config_invalid key=%s value=%s dropped=%s",
+                DRIVES_KEY,
+                raw,
+                ",".join(dropped),
+            )
+        return wanted
+
+    @property
+    def drives(self) -> list[str] | None:
+        """要显示的盘符(None = 自动),也是 ini 里 `drives` 的生效值。"""
+        return self._wanted_drives
+
+    def set_drives(self, wanted: list[str] | None) -> None:
+        """提交要显示的盘符:落盘 + 立刻按新集合重建盘条。"""
+        self._wanted_drives = wanted
+        self._settings.setValue(DRIVES_KEY, drives_text(wanted))
+        self._settings.sync()
+        self._refresh_drives(reason="config", force=True)
+
+    def _build_bars(self, paths: list[str]) -> None:
+        """按盘符列表重建盘条 —— 盘数决定窗口高度,盘集一变就整批换掉(逐个增删不划算)。"""
+        for bar in self._bars:
+            bar.hide()
+            bar.setParent(None)  # 立刻脱离窗口树,别等 deleteLater 那一轮事件循环
+            bar.deleteLater()
+        self._bars = []
+        for path in paths:
+            bar = DiskBar(path, self, self._warn_threshold, self._danger_threshold)
+            # 详情文字挂在**窗口**上,而盘条铺满整块区域、自己又不处理 tooltip —— 不给它设这个,
+            # 悬停在盘条上时那条 tooltip 就归盘条(它没有文字 → 不弹),表现为"详情时有时无"。
+            # 让盘条不接收鼠标事件,悬停统一归窗口,整块区域都能弹(不必逐个给子控件设 tooltip)。
+            bar.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._bars.append(bar)
+        self.apply_scale(self._ui_scale)  # 尺寸、每个盘条的位置与高度;贴边锚点也跟着重算
+        # 窗口刚被改过:按光标位置重新判断要不要收起 —— 正收着的时候插上移动硬盘,重建之后
+        # 不该一直摊开着(尺寸重排本来就会先把它展开)
+        self._settle_edge()
+
+    def _refresh_drives(self, *, reason: str, force: bool = False) -> bool:
+        """盘集变了就重建盘条(每次刷新都来看一眼),返回是否重建了。"""
+        detected = detect_drives()
+        paths = visible_drives(detected, self._wanted_drives)
+        if not force and paths == [bar.path for bar in self._bars]:
+            return False
+        log.info(
+            "event=drives use=%s detected=%s reason=%s",
+            ",".join(paths) or "-",
+            ",".join(detected) or "-",
+            reason,
+        )
+        self._build_bars(paths)
+        return True
+
     # ---- 数据刷新 ----
     def refresh(self) -> None:
+        self._refresh_drives(reason="refresh")  # 先看盘集变没变(插拔移动硬盘就靠这里)
         for bar in self._bars:
             bar.reload()
-        summary = "\n".join(bar.detail_text() for bar in self._bars)
-        self.setToolTip(summary)
-        self.updated.emit(summary)  # 托盘图标靠它同步悬停提示
+        detail = self.summary()  # 完整明细:挂在窗口上,也进调试日志
+        self.setToolTip(detail)
+        self.updated.emit(self.summary(compact=True))  # 托盘:紧凑版,靠它同步悬停提示
         self._retarget()
         if self._edge_hidden:
             self.update()  # 尾巴上的小线段跟着数据走:进度条被藏了,刷新得自己重画
@@ -1108,8 +1287,12 @@ class StatusBarWindow(QWidget):
             self._max_ratio(),
             self._level,
             self._target,
-            " | ".join(summary.split("\n")),
+            " | ".join(detail.split("\n")),
         )
+
+    def summary(self, *, compact: bool = False) -> str:
+        """状态文字(悬停提示):完整版挂在窗口上,紧凑版发给托盘 —— 出处只有 `summary_text`。"""
+        return summary_text(self._bars, compact=compact)
 
     def _max_ratio(self) -> float:
         ratios = [r for bar in self._bars if (r := bar.ratio()) is not None]
@@ -1277,14 +1460,14 @@ class StatusBarWindow(QWidget):
 
     def full_size(self) -> QSize:
         """展开形态的尺寸(当前缩放下的)—— 用例与形变目标都用它,不另推一遍。"""
-        return layout_size(self._ui_scale, len(self._bars) or len(DRIVES))
+        return layout_size(self._ui_scale, len(self._bars) or 1)
 
     def tail_size(self, edge: str | None = None) -> QSize:
         """尾巴尺寸:**固定的设备像素**,不随主界面缩放变(那是展开形态的事)。
 
         `edge` 决定线的方向(见 `tail_layout`),默认用当前贴着的那条边;没贴边时按横线那套算。
         """
-        rows = len(self._bars) or len(DRIVES)
+        rows = len(self._bars) or 1
         width, height, _ = tail_layout(edge or self._edge or "top", rows)
         return QSize(width, height)
 
@@ -1521,8 +1704,8 @@ class StatusBarWindow(QWidget):
 
     def apply_scale(self, scale: float) -> None:
         """按系数重排整窗:窗口尺寸、每个盘条的位置与高度、绘制变换都乘它。"""
-        pad, gap, row_h, width = scaled_layout(scale, len(self._bars) or len(DRIVES))
-        self.setFixedSize(layout_size(scale, len(self._bars) or len(DRIVES)))
+        pad, gap, row_h, width = scaled_layout(scale, len(self._bars) or 1)
+        self.setFixedSize(layout_size(scale, len(self._bars) or 1))
         if self._edge is not None:
             # 尺寸变了:齐平位置与尾巴大小都要重算。`snap_to_edge` 会先长回展开形态再判 ——
             # 用户正在调大小,看得见才好对齐(贴边的标记只有十几像素,量不出贴哪条边)。
@@ -1692,8 +1875,8 @@ class TrayIcon(QSystemTrayIcon):
 
         self.activated.connect(self._on_activated)
         window.updated.connect(self.setToolTip)
-        # 窗口在托盘创建之前就 refresh 过一次,那次信号没人接,这里补上当前值
-        self.setToolTip(window.toolTip())
+        # 窗口在托盘创建之前就 refresh 过一次,那次信号没人接,这里补上当前值(托盘用紧凑版)
+        self.setToolTip(window.summary(compact=True))
 
     def _sync_state(self) -> None:
         """菜单弹出前,把文字和勾选对齐到窗口的真实状态。"""
@@ -2073,13 +2256,12 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     level = logging_setup.setup_logging(log_dir(), APP_NAME)
     log.info(
-        "event=start version=%s frozen=%s level=%s config=%s log=%s drives=%s",
+        "event=start version=%s frozen=%s level=%s config=%s log=%s",
         app_version(),  # 顺便把版本记在启动行:排查时"这是哪一版"最常被问
         bool(getattr(sys, "frozen", False)),
         logging.getLevelName(level),
         settings_path(),
         log_path(),
-        ",".join(DRIVES),
     )
     # 打包成 --noconsole 后 stderr 是 None:先记下来,省得以后怀疑日志缺了控制台那一半
     log.debug("event=start stderr=%s", "none" if sys.stderr is None else "available")

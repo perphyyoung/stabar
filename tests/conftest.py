@@ -92,8 +92,18 @@ def low_usage(monkeypatch) -> None:
 
 
 @pytest.fixture
-def window(qtbot, tmp_path, monkeypatch, low_usage, fake_registry):
-    """构造窗口:配置引到 tmp,磁盘数据与注册表都是假的。"""
+def fake_drives(monkeypatch) -> list[str]:
+    """把盘符探测钉成 `C:/` `D:/` —— "这台机器插了几个盘"不该决定用例的结果。"""
+    import main
+
+    drives = ["C:/", "D:/"]
+    monkeypatch.setattr(main, "detect_drives", lambda: list(drives))
+    return drives
+
+
+@pytest.fixture
+def window(qtbot, tmp_path, monkeypatch, low_usage, fake_registry, fake_drives):
+    """构造窗口:配置引到 tmp,磁盘数据、注册表、盘符探测都是假的。"""
     import main
 
     monkeypatch.setattr(main, "settings_path", lambda: tmp_path / "stabar.ini")
