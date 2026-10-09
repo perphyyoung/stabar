@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -40,6 +41,9 @@ log = logging.getLogger("stabar")
 
 ACTIVATE_MESSAGE = b"activate"
 SOCKET_TIMEOUT_MS = 500  # 连接/发送最多等这么久:别为了"叫醒已有实例"卡住启动
+WAKE_READ_TIMEOUT_MS = (
+    500  # 读唤醒消息的**总**超时(有界,见 _read_activation;QtLocalPeer 默认 30 秒)
+)
 ALLOW_MULTIPLE_ENV = (
     "STABAR_ALLOW_MULTIPLE"  # 置 1 可故意开多份(排查 / 对比用;也是被锁住时的逃生口)
 )
@@ -122,15 +126,44 @@ class SingleInstance:
         socket.disconnectFromServer()
 
     def _on_connection(self) -> None:
-        socket = self._server.nextPendingConnection()
-        if socket is None:
-            return
-        socket.readyRead.connect(lambda: self._on_message(socket))
+        # **循环取空队列**(官方示例的写法):只取一个的话,队列里残留的连接在某些平台上
+        # 可能不再发 newConnection —— 第二个实例连点两次就踩得到
+        while self._server.hasPendingConnections():
+            self._read_activation(self._server.nextPendingConnection())
 
-    def _on_message(self, socket: QLocalSocket) -> None:
-        if bytes(socket.readAll().data()) != ACTIVATE_MESSAGE:
+    def _read_activation(self, socket: QLocalSocket) -> None:
+        """把第二个实例的 "activate" 读出来:**同步 + 有界超时,不依赖 `readyRead`**。
+
+        **为什么不用信号**:`readyRead` 只在"订阅之后又有新数据"时才会发 —— 对端写得快时,
+        `nextPendingConnection()` 拿到的 socket 里数据已经躺好,那一刻的信号早已发过(还没有
+        订阅者),之后**永远不会再发**。实测踩过:第二个实例报 `notified=1`,第一个实例毫无反应;
+        打补丁"订阅前先查 `bytesAvailable()`"后复量 10 轮,缓冲值恒为 0、仍有 1 轮信号永远不来
+        —— 说明这条路本身就不可靠,不是订阅顺序能救的。
+
+        Qt 官方 Solutions 库的同款场景(`QtSingleApplication` 的 `QtLocalPeer::receiveConnection`)
+        也不用信号,而是 `bytesAvailable()` + `waitForReadyRead()` **同步读** —— 这里照搬。
+        两处不同:①超时**有界**(它第一个 `waitForReadyRead()` 用默认 30 秒,能把 GUI 卡死;
+        我们的消息只有 8 字节,连上就该有,等不到说明有别的问题);②等不到**记警告**而不是
+        静默丢(见 `WAKE_READ_TIMEOUT_MS`)。
+        """
+        deadline = time.monotonic() + WAKE_READ_TIMEOUT_MS / 1000
+        payload = b""
+        while len(payload) < len(ACTIVATE_MESSAGE):
+            payload += bytes(socket.readAll().data())
+            if len(payload) >= len(ACTIVATE_MESSAGE):
+                break
+            remaining_ms = round((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0 or not socket.waitForReadyRead(
+                min(remaining_ms, WAKE_READ_TIMEOUT_MS)
+            ):
+                break
+        if payload != ACTIVATE_MESSAGE:
+            log.warning("event=single_instance state=unreadable bytes=%d", len(payload))
+            socket.disconnectFromServer()
+            socket.deleteLater()
             return
         log.info("event=single_instance action=activate")
         if self._callback is not None:
             self._callback()
         socket.disconnectFromServer()
+        socket.deleteLater()
