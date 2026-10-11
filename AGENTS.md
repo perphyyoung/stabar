@@ -122,6 +122,7 @@ uv run pytest -q     # 4. 跑测试
 - [ ] 没有和别的层重复断言
 - [ ] 涉及真实状态的结论配了外部事实
 - [ ] `uv run pytest -q` 全过;动了第 4 层还要再跑一次 `STABAR_E2E=1`
+  (skip 原因 `-rs` 与最慢 4 条 `--durations=4` 由 `pyproject.toml` 的 addopts 默认带上)
 - [ ] 新踩的坑写进 `开发经验.md`;**必须一直记得**的那几条写进本文件
 
 ## 经验记录

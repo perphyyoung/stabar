@@ -513,7 +513,12 @@ def visible_menu_names() -> list[str]:
 
 
 def click_menu_item(pattern: str, timeout: float = 5.0, *, closes_menu: bool = True) -> str:
-    """在**当前可见的菜单**里按键名正则找到一项、真点它,返回点到的名字。
+    """在**当前可见的菜单**里按名字找到一项、真点它,返回点到的名字。
+
+    `pattern` 是正则,但按**整名匹配**(自动包成 `^(?:…)$`)—— 非锚定的子串匹配会误点:
+    实测踩到,「显示所有磁盘盘符」加入菜单后,`隐藏|显示` 先匹配到它(它排在「隐藏」前面、
+    名字里就含"显示"),而它是复选框行、点了不关菜单,于是被判成"点空了",重试 3 次(≈7 秒)
+    后 skip —— 看起来就像"真人鼠标干扰"。
 
     找不到则断言失败(附上当时菜单里的项名);点完菜单没关说明多半被真人鼠标干扰 —— 抛
     `InterferenceError`,交给调用方的 `guarded()` 重试或跳过,而不是记成失败。
@@ -527,7 +532,7 @@ def click_menu_item(pattern: str, timeout: float = 5.0, *, closes_menu: bool = T
     while time.monotonic() < deadline:
         menu = visible_menu()
         if menu is not None:
-            item = menu.MenuItemControl(RegexName=pattern, searchDepth=1)
+            item = menu.MenuItemControl(RegexName=f"^(?:{pattern})$", searchDepth=1)
             if item.Exists(0.5, 0.1):
                 name = str(item.Name)
                 item.Click()  # 真鼠标

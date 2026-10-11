@@ -68,3 +68,6 @@ extend-ignore-names = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# 每轮测试默认带上:skip 原因(-rs,这层的 skip 都有"为什么"要交代)与最慢 4 条(--durations,
+# 真机 E2E 的"哪一步停留很久"靠它定位 —— 实测靠它抓到过菜单误点重试的 7 秒)
+addopts = "-rs --durations=4"

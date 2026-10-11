@@ -105,7 +105,7 @@ $env:STABAR_LOG_LEVEL = "DEBUG"    # 排查用;大小写不敏感,重启进程�
 **1. 单元测试(默认,含进程内 A 层 E2E)** —— 离屏 Qt,不弹真窗口、不碰真实 `stabar.ini` 与真实注册表:
 
 ```powershell
-uv run pytest -q -rs
+uv run pytest -q
 ```
 
 **2. 源码形态 E2E** —— 进程外真输入(会真的移动鼠标、抢焦点,必须有真实桌面会话),**不必打包**:
@@ -123,6 +123,7 @@ $env:STABAR_E2E = "1"; uv run pytest tests/test_e2e_real_input.py -q
 
 三点说明:
 
+- **skip 原因(`-rs`)与最慢 4 条(`--durations=4`)由 `pyproject.toml` 的 `addopts` 默认带上**,不用敲:skip 都有"为什么"要交代;真机 E2E"哪一步停留很久"靠后者定位;
 - 新增用例该写在哪一层(纯函数 / 组件 / 进程内 E2E / 进程外真输入 E2E)见
   [`AGENTS.md`](AGENTS.md) 的「测试分层」;
 - 多条环境变量之间用 **`;` 而不是 `&&`**:`&&` 右边必须是 pipeline,而赋值不是 —— 实测直接
