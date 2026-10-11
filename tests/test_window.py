@@ -239,7 +239,9 @@ def test_drive_set_follows_the_detector(window, monkeypatch) -> None:
     """盘集变了就重建盘条,窗口高度跟着走 —— 插上移动硬盘,它就出现在列表里。"""
     assert [bar.path for bar in window._bars] == ["C:/", "D:/"]
 
-    monkeypatch.setattr(drives, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+    monkeypatch.setattr(
+        drives, "detect_drives", lambda include_removable=True: ["C:/", "D:/", "F:/"]
+    )
     window.refresh()
 
     assert [bar.path for bar in window._bars] == ["C:/", "D:/", "F:/"]
@@ -256,7 +258,9 @@ def test_drives_config_limits_what_is_shown(
     ini = tmp_path / "stabar.ini"
     ini.write_text("[General]\ndrives=C,D\n", encoding="utf-8")
     monkeypatch.setattr(paths, "settings_path", lambda: ini)
-    monkeypatch.setattr(drives, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+    monkeypatch.setattr(
+        drives, "detect_drives", lambda include_removable=True: ["C:/", "D:/", "F:/"]
+    )
 
     window = main.StatusBarWindow()
     qtbot.addWidget(window)
@@ -286,11 +290,76 @@ def test_drive_change_while_collapsed_re_arms_the_collapse(window, qtbot, monkey
     window._hide_to_edge()
     qtbot.waitUntil(lambda: window.size() == window.tail_size(), timeout=1000)
 
-    monkeypatch.setattr(drives, "detect_drives", lambda: ["C:/", "D:/", "F:/"])
+    monkeypatch.setattr(
+        drives, "detect_drives", lambda include_removable=True: ["C:/", "D:/", "F:/"]
+    )
     window.refresh()
 
     assert len(window._bars) == 3  # 盘条已经是新的
     qtbot.waitUntil(lambda: window.edge_hidden, timeout=main.EDGE_HIDE_DELAY_MS + 2000)
+
+
+def test_show_all_drives_is_on_by_default(window) -> None:
+    """「显示所有磁盘盘符」默认勾选 = 现状(固定盘 + 可移动盘都探测)。"""
+    assert window.show_all_drives is True
+
+
+def test_unchecking_show_all_drives_drops_removable_drives(
+    window, monkeypatch, tmp_path, events
+) -> None:
+    """取消勾选:探测口径只剩本地固定盘,可移动盘的行**当场消失**;ini 写回、留一条日志。"""
+
+    def fake_detect(include_removable: bool = True) -> list[str]:
+        return ["C:/", "D:/", "E:/"] if include_removable else ["C:/", "D:/"]
+
+    monkeypatch.setattr(main.drives, "detect_drives", fake_detect)
+
+    window.set_show_all_drives(False)
+
+    assert [bar.path for bar in window._bars] == ["C:/", "D:/"]  # 可移动盘的行当场消失
+    assert "show_all_drives=false" in (tmp_path / paths.SETTINGS_NAME).read_text(encoding="utf-8")
+    assert any("event=show_all_drives enabled=False" in e for e in events())
+
+    window.set_show_all_drives(True)  # 再勾上:回来
+    assert [bar.path for bar in window._bars] == ["C:/", "D:/", "E:/"]
+    assert any("event=show_all_drives enabled=True" in e for e in events())
+
+
+def test_show_all_drives_is_resettable(window) -> None:
+    """「还原配置」管得到它:diff 列得出差异,还原后回默认(开)。"""
+    window.set_show_all_drives(False)
+    assert ("显示所有磁盘盘符", "关", "开") in window.resettable_diff()
+
+    window.reset_settings()
+
+    assert window.show_all_drives is True
+    assert window.resettable_diff() == []
+
+
+def test_summary_is_published_right_after_the_drive_set_changes(window, qtbot, monkeypatch) -> None:
+    """切换盘集后,悬停卡片与托盘要**立即**拿到新摘要 —— 不能等下一轮 15 秒的定时刷新。
+
+    实测:主界面立刻变了,托盘悬停却延迟(重建盘条的提交路径没发 `updated`)。
+    """
+    from PySide6.QtCore import QRect
+
+    def fake_detect(include_removable: bool = True) -> list[str]:
+        return ["C:/", "D:/", "E:/"] if include_removable else ["C:/", "D:/"]
+
+    monkeypatch.setattr(main.drives, "detect_drives", fake_detect)
+    window._hover_card.present(
+        window.summary(), window.ui_scale, window.frameGeometry(), QRect(0, 0, 1920, 1040)
+    )
+
+    with qtbot.waitSignal(window.updated) as blocker:
+        window.set_show_all_drives(False)
+    assert blocker.args == [window.summary(compact=True)]  # 托盘当场拿到新摘要
+    assert window._hover_card.text == window.summary()  # 卡片也当场换字
+    assert "E:" not in blocker.args[0]
+
+    with qtbot.waitSignal(window.updated):
+        window.set_drives(["C:/"])  # 手写盘符走同一条提交路径,同样立即
+    assert "E:" not in window._hover_card.text and "D:" not in window._hover_card.text
 
 
 def test_hit_layer_covers_whole_rect(window) -> None:

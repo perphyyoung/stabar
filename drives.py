@@ -61,12 +61,19 @@ def drive_roots() -> list[str]:
     return [f"{part[0]}:/" for part in buffer[:size].split("\0") if part]
 
 
-def detect_drives() -> list[str]:
-    """**已加载**的盘符(含移动硬盘):固定盘 + 可移动盘,而且**试读得到**(见模块说明)。"""
+def detect_drives(include_removable: bool = True) -> list[str]:
+    """**已加载**的盘符(含移动硬盘):固定盘 + 可移动盘,而且**试读得到**(见模块说明)。
+
+    `include_removable=False` 只收**本地固定盘** —— 托盘「显示所有磁盘盘符」取消勾选时的口径
+    (`KEEP_DRIVE_TYPES` 收可移动类型正是为了默认含移动硬盘)。⚠️ 系统口径的盲区:USB 硬盘盒、
+    部分移动硬盘报的是 `DRIVE_FIXED`,`GetDriveType` 分不出"内置 vs USB 盒",它在两种模式下
+    都会显示;能被这个开关分出去的只有"可移动"类型(U 盘、读卡器、部分移动硬盘)。
+    """
+    keep_types = KEEP_DRIVE_TYPES if include_removable else (DRIVE_FIXED,)
     usable = [
         root
         for root in drive_roots()
-        if _kernel32.GetDriveTypeW(root) in KEEP_DRIVE_TYPES and read_disk(root) is not None
+        if _kernel32.GetDriveTypeW(root) in keep_types and read_disk(root) is not None
     ]
     return sorted(usable)
 

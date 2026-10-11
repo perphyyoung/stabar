@@ -181,6 +181,21 @@ class TrayIcon(QSystemTrayIcon):
         #
         # 两个开关都是行内右侧复选框:菜单里一个"可勾选菜单项"都不留,Qt 才不会保留勾选列
         # (勾选列要花掉约 20px,数字与做法见 开发经验第 39 条)
+        # 「显示所有磁盘盘符」:默认开(= 现状);取消后探测只收本地固定盘,
+        # U 盘 / 读卡器这类可移动盘不再出现(USB 硬盘盒报固定盘类型,仍会显示 —— 系统分不出)
+        self._show_all_drives = QCheckBox(self._menu)
+        self._show_all_drives.setToolTip(
+            "取消后只显示系统内置的固定盘;U 盘、读卡器这类可移动盘不再出现"
+            "(USB 硬盘盒报的是固定盘类型,仍会显示)"
+        )
+        self._show_all_drives.toggled.connect(window.set_show_all_drives)
+        self._add_row(
+            "显示所有磁盘盘符",
+            self._show_all_drives,
+            "显示所有磁盘盘符",
+            self._show_all_drives.toolTip(),
+        )
+
         self._click_through = QCheckBox(self._menu)
         self._click_through.setToolTip("开启后窗口不再接收鼠标,只能从本菜单关掉")
         self._click_through.toggled.connect(window.set_click_through)
@@ -282,6 +297,11 @@ class TrayIcon(QSystemTrayIcon):
         self._edge_hide.blockSignals(True)
         self._edge_hide.setChecked(self._window.edge_hide)
         self._edge_hide.blockSignals(False)
+
+        # 显示所有磁盘盘符:以窗口的生效开关为准
+        self._show_all_drives.blockSignals(True)
+        self._show_all_drives.setChecked(self._window.show_all_drives)
+        self._show_all_drives.blockSignals(False)
 
     def _add_row(
         self,

@@ -4,6 +4,7 @@
 (判据见 AGENTS.md 的「测试分层」)。
 """
 
+from collections import namedtuple
 from itertools import pairwise
 
 import pytest
@@ -228,6 +229,26 @@ def test_read_disk_returns_none_when_query_fails(monkeypatch) -> None:
 
     monkeypatch.setattr(drives.shutil, "disk_usage", boom)
     assert drives.read_disk("Z:/") is None
+
+
+def test_detect_drives_can_exclude_removable(monkeypatch) -> None:
+    """「显示所有磁盘盘符」取消后,探测只收**本地固定盘**;可移动类型(U 盘 / 读卡器)被排掉。
+
+    CD-ROM(类型 4)本来就收不进来,两种口径一致;试读那一步照旧起作用(见模块说明)。
+    """
+    monkeypatch.setattr(drives, "drive_roots", lambda: ["C:/", "D:/", "E:/", "F:/"])
+    types = {
+        "C:/": drives.DRIVE_FIXED,
+        "D:/": drives.DRIVE_FIXED,
+        "E:/": drives.DRIVE_REMOVABLE,
+        "F:/": 4,  # DRIVE_CDROM
+    }
+    monkeypatch.setattr(drives._kernel32, "GetDriveTypeW", lambda root: types[root])
+    usage = namedtuple("usage", "used total")(1, 2)  # read_disk 只用 .used / .total
+    monkeypatch.setattr(drives.shutil, "disk_usage", lambda root: usage)  # 全部试读得到
+
+    assert drives.detect_drives() == ["C:/", "D:/", "E:/"]  # 默认:固定 + 可移动(现状)
+    assert drives.detect_drives(include_removable=False) == ["C:/", "D:/"]  # 取消勾选的口径
 
 
 def test_card_pos_sits_below_the_window_by_default() -> None:

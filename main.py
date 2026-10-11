@@ -85,6 +85,13 @@ EDGE_HIDE_DELAY_MS = 250  # 指针离开后隔多久才收起:没有它,光标�
 EDGE_HIDE_DEFAULT = True  # 默认开:贴到边就收起成小尾巴
 EDGE_HIDE_KEY = "edge_hide"
 
+# --- 显示所有磁盘盘符(托盘复选框,见 tray 的「鼠标穿透」上方那一行)---
+# 默认开 = 现状:固定盘 + 可移动盘;取消后探测只收本地固定盘(drives.detect_drives 的口径),
+# U 盘 / 读卡器这类可移动盘不再出现。USB 硬盘盒报的是固定盘类型,两种模式下都会显示 ——
+# 系统分不出"内置 vs USB 盒",这是 GetDriveType 的盲区(见 drives.detect_drives 的说明)。
+SHOW_ALL_DRIVES_DEFAULT = True
+SHOW_ALL_DRIVES_KEY = "show_all_drives"
+
 # --- 整窗缩放(托盘「调整尺寸」滑杆调)---
 # 存的是**系数**而不是像素:窗口高度是"盘数 × 行高"推出来的,存绝对高会跟盘数打架;而上面的
 # layout.WINDOW_W / layout.ROW_H / layout.PAD / layout.GAP 本来就是一套常量,乘同一个系数最自然。
@@ -110,6 +117,12 @@ RESETTABLE_SETTINGS = (
         "显示的盘符",
         None,
         lambda value: "自动" if value is None else drives.drives_text(value),
+    ),
+    (
+        SHOW_ALL_DRIVES_KEY,
+        "显示所有磁盘盘符",
+        SHOW_ALL_DRIVES_DEFAULT,
+        lambda value: "开" if value else "关",
     ),
 )
 
@@ -149,6 +162,8 @@ class StatusBarWindow(QWidget):
         self._saved_ui_scale = self._ui_scale
         # 要显示哪些盘:ini 里的 `drives`(None = 自动,用运行时探测结果)
         self._wanted_drives = self._read_drives()
+        # 探测要不要含可移动盘(托盘「显示所有磁盘盘符」);**必须排在下面的 _refresh_drives 之前**
+        self._show_all_drives = self._read_show_all_drives()
 
         # 贴边隐藏:只记"贴哪条边 + 展开时的锚点";收起 / 展开只改窗口本身,不动配置。
         # **必须排在下面的 apply_scale() 之前** —— 它会读 `self._edge` 决定要不要重算贴边。
@@ -422,6 +437,8 @@ class StatusBarWindow(QWidget):
             return self._edge_hide
         if key == drives.DRIVES_KEY:
             return self._wanted_drives
+        if key == SHOW_ALL_DRIVES_KEY:
+            return self._show_all_drives
         return self.thresholds[key.removesuffix("_threshold")]
 
     def resettable_diff(self) -> list[tuple[str, str, str]]:
@@ -457,6 +474,8 @@ class StatusBarWindow(QWidget):
             self.set_edge_hide(bool(targets[EDGE_HIDE_KEY]))
         if drives.DRIVES_KEY in targets:
             self.set_drives(targets[drives.DRIVES_KEY])
+        if SHOW_ALL_DRIVES_KEY in targets:
+            self.set_show_all_drives(bool(targets[SHOW_ALL_DRIVES_KEY]))
         wanted = self.thresholds
         for key in ("warn_threshold", "danger_threshold", "lit_threshold"):
             if key in targets:
@@ -517,6 +536,7 @@ class StatusBarWindow(QWidget):
         self._settings.setValue(drives.DRIVES_KEY, drives.drives_text(wanted))
         self._settings.sync()
         self._refresh_drives(reason="config", force=True)
+        self._publish_summary()
 
     def _build_bars(self, paths: list[str]) -> None:
         """按盘符列表重建盘条 —— 盘数决定窗口高度,盘集一变就整批换掉(逐个增删不划算)。"""
@@ -541,7 +561,7 @@ class StatusBarWindow(QWidget):
 
     def _refresh_drives(self, *, reason: str, force: bool = False) -> bool:
         """盘集变了就重建盘条(每次刷新都来看一眼),返回是否重建了。"""
-        detected = drives.detect_drives()
+        detected = drives.detect_drives(include_removable=self._show_all_drives)
         paths = drives.visible_drives(detected, self._wanted_drives)
         if not force and paths == [bar.path for bar in self._bars]:
             return False
@@ -554,15 +574,49 @@ class StatusBarWindow(QWidget):
         self._build_bars(paths)
         return True
 
+    # ---- 显示所有磁盘盘符:探测口径的开关(取消后只收本地固定盘,见 drives.detect_drives) ----
+    def _read_show_all_drives(self) -> bool:
+        """读「显示所有磁盘盘符」:非法值退回默认并留痕(与其它配置项同一套做法)。"""
+        raw = self._settings.value(SHOW_ALL_DRIVES_KEY, SHOW_ALL_DRIVES_DEFAULT)
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+        log.warning(
+            "event=config_invalid key=%s fallback=%s", SHOW_ALL_DRIVES_KEY, SHOW_ALL_DRIVES_DEFAULT
+        )
+        return SHOW_ALL_DRIVES_DEFAULT
+
+    @property
+    def show_all_drives(self) -> bool:
+        """「显示所有磁盘盘符」勾选(也是 ini 里 `show_all_drives` 的值)。"""
+        return self._show_all_drives
+
+    def set_show_all_drives(self, enabled: bool) -> None:
+        """提交开关:落盘 + 一条日志 + 按新口径重探盘集(盘集变了走现有重建,可移动盘当场消失)。
+
+        值没变直接返回:`_sync_state` 用 `setChecked` 对齐勾选态时会触发一次 toggled 回写,
+        不挡掉的话每开一次菜单就多一条日志。
+        """
+        if enabled == self._show_all_drives:
+            return
+        self._show_all_drives = enabled
+        self._settings.setValue(SHOW_ALL_DRIVES_KEY, enabled)
+        self._settings.sync()
+        log.info("event=show_all_drives enabled=%s", enabled)
+        self._refresh_drives(reason="config", force=True)
+        self._publish_summary()
+
     # ---- 数据刷新 ----
     def refresh(self) -> None:
         self._refresh_drives(reason="refresh")  # 先看盘集变没变(插拔移动硬盘就靠这里)
         for bar in self._bars:
             bar.reload()
         detail = self.summary()  # 完整明细:给悬停明细卡,也进调试日志
-        if self._hover_card.isVisible():
-            self._hover_card.update_text(detail, self._ui_scale)  # 卡片开着就跟着数据走
-        self.updated.emit(self.summary(compact=True))  # 托盘:紧凑版(一盘一行),靠它同步悬停提示
+        self._publish_summary()
         self._retarget()
         if self._edge_hidden:
             self.update()  # 尾巴上的小线段跟着数据走:进度条被藏了,刷新得自己重画
@@ -574,6 +628,17 @@ class StatusBarWindow(QWidget):
             self._target,
             " | ".join(detail.split("\n")),
         )
+
+    def _publish_summary(self) -> None:
+        """把当前摘要推给所有消费方:主界面的悬停卡片 + 托盘(经 `updated` 信号)。
+
+        `refresh()` 每 15 秒走一次;**重建盘条的提交路径也要走**(`set_drives` /
+        `set_show_all_drives`)—— 不发的话托盘悬停要等下一轮定时刷新才换字,看起来就是
+        "主界面立刻变了、托盘要延迟"(实测踩到)。
+        """
+        if self._hover_card.isVisible():
+            self._hover_card.update_text(self.summary(), self._ui_scale)
+        self.updated.emit(self.summary(compact=True))  # 托盘:紧凑版(一盘一行)
 
     def summary(self, *, compact: bool = False) -> str:
         """状态文字(悬停提示):完整版给窗口外的明细卡,紧凑版发给托盘 —— 出处只有 `summary_text`。"""

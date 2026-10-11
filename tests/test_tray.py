@@ -281,6 +281,7 @@ def test_menu_items_and_order(tray_icon) -> None:
         "版本号",  # 最上面一行:左「版本号」、右版本值
         "配置和日志目录",  # 紧跟其后:右侧「打开」按钮
         "",  # 分隔线:上面两行是"关于 / 自检",下面是操作
+        "显示所有磁盘盘符",  # 勾选项放最上:不容易误触(在「鼠标穿透」上方,新需求指定的位置)
         "鼠标穿透",  # 勾选项放最上:不容易误触
         "开机自启",
         "贴边隐藏",  # 同上一行:行内右侧复选框
@@ -406,6 +407,17 @@ def test_click_through_checkbox_reflects_window(window, tray_icon) -> None:
     assert tray_icon._click_through.isChecked()
 
 
+def test_show_all_drives_checkbox_reflects_window(window, tray_icon) -> None:
+    """「显示所有磁盘盘符」勾选以窗口的生效开关为准(与穿透 / 贴边同一套)。"""
+    window.set_show_all_drives(False)
+    tray_icon._sync_state()
+    assert not tray_icon._show_all_drives.isChecked()
+
+    window.set_show_all_drives(True)
+    tray_icon._sync_state()
+    assert tray_icon._show_all_drives.isChecked()
+
+
 def test_switches_are_checkbox_rows_not_checkable_items(tray_icon) -> None:
     """两个开关是"行内右侧复选框",不是可勾选菜单项。
 
@@ -416,7 +428,11 @@ def test_switches_are_checkbox_rows_not_checkable_items(tray_icon) -> None:
     assert isinstance(tray_icon._autostart, QCheckBox)
     assert [action.text() for action in tray_icon._menu.actions() if action.isCheckable()] == []
 
-    for box, name in ((tray_icon._click_through, "鼠标穿透"), (tray_icon._autostart, "开机自启")):
+    for box, name in (
+        (tray_icon._show_all_drives, "显示所有磁盘盘符"),
+        (tray_icon._click_through, "鼠标穿透"),
+        (tray_icon._autostart, "开机自启"),
+    ):
         assert tray_icon._row_controls[box].text() == name  # 是控件行,不是菜单项
         margins = box.parentWidget().layout().contentsMargins()
         assert margins.left() == margins.right() == tray.MENU_ITEM_INDENT  # 左右留白相等

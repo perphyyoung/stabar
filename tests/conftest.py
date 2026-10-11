@@ -97,7 +97,7 @@ def fake_drives(monkeypatch) -> list[str]:
     import drives
 
     roots = ["C:/", "D:/"]
-    monkeypatch.setattr(drives, "detect_drives", lambda: list(roots))
+    monkeypatch.setattr(drives, "detect_drives", lambda include_removable=True: list(roots))
     return roots
 
 
