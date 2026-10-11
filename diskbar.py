@@ -224,9 +224,10 @@ class DiskBar(QWidget):
 def summary_text(bars: list[DiskBar], *, compact: bool = False) -> str:
     """悬停提示的文字 —— **只有这一处**:完整版给主界面,紧凑版给托盘。
 
-    托盘的提示有平台上限(Windows 的 `NOTIFYICONDATA.szTip` 只有 128 个字符),完整明细会被
-    shell 从中间截掉;主界面的 tooltip 没有这个限制,所以两种长度各取所需,而文字始终由这里产出。
+    两种都是**逐盘一行**。紧凑版("盘符 + 占比")可能走原生 tooltip(托盘图标矩形拿不到时的
+    兜底,见 `tray._poll_hover`),那里有平台上限(`NOTIFYICONDATA.szTip` 128 字符)—— 盘多时
+    由 `tray.TRAY_TIP_MAX` 的用例盯着。
     """
     if compact:
-        return "  ".join(bar.short_text() for bar in bars)
+        return "\n".join(bar.short_text() for bar in bars)
     return "\n".join(bar.detail_text() for bar in bars)

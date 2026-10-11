@@ -24,6 +24,7 @@ import sys
 from PySide6.QtCore import (
     QEasingCurve,
     QPoint,
+    QRect,
     QRectF,
     QSettings,
     QSize,
@@ -46,6 +47,7 @@ from PySide6.QtWidgets import (
 
 import diskbar
 import drives
+import hovercard
 import layout
 import logging_setup
 import paths
@@ -136,9 +138,6 @@ class StatusBarWindow(QWidget):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        # Qt 文档:tooltip 默认只对**活动窗口**显示,而本窗口置顶、从不被激活(真人实测:
-        # 详情会时有时无甚至一直不出现)。开了这条,非活动窗口也照常弹详情。
-        self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self.setFixedSize(
             layout.layout_size(layout.UI_SCALE_DEFAULT, 1)
         )  # 占位,真实尺寸由 _build_bars 定
@@ -223,6 +222,14 @@ class StatusBarWindow(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh)
         self._timer.start(self._refresh_seconds * 1000)
+
+        # 悬停明细卡:窗口**不再挂 tooltip**(它会弹在主界面上),完整明细挪到窗口外的小卡片
+        # (见 hovercard 模块说明)。定时到点后再核一遍状态,排上定时器不等于一定弹。
+        self._hover_card = hovercard.HoverCard()
+        self._card_timer = QTimer(self)
+        self._card_timer.setSingleShot(True)
+        self._card_timer.setInterval(hovercard.SHOW_DELAY_MS)
+        self._card_timer.timeout.connect(self._show_hover_card)
 
         self._apply_level(0.0)  # 先按最暗档铺一次,避免动画不触发时停留在全亮
         self.refresh()
@@ -552,9 +559,10 @@ class StatusBarWindow(QWidget):
         self._refresh_drives(reason="refresh")  # 先看盘集变没变(插拔移动硬盘就靠这里)
         for bar in self._bars:
             bar.reload()
-        detail = self.summary()  # 完整明细:挂在窗口上,也进调试日志
-        self.setToolTip(detail)
-        self.updated.emit(self.summary(compact=True))  # 托盘:紧凑版,靠它同步悬停提示
+        detail = self.summary()  # 完整明细:给悬停明细卡,也进调试日志
+        if self._hover_card.isVisible():
+            self._hover_card.update_text(detail, self._ui_scale)  # 卡片开着就跟着数据走
+        self.updated.emit(self.summary(compact=True))  # 托盘:紧凑版(一盘一行),靠它同步悬停提示
         self._retarget()
         if self._edge_hidden:
             self.update()  # 尾巴上的小线段跟着数据走:进度条被藏了,刷新得自己重画
@@ -568,7 +576,7 @@ class StatusBarWindow(QWidget):
         )
 
     def summary(self, *, compact: bool = False) -> str:
-        """状态文字(悬停提示):完整版挂在窗口上,紧凑版发给托盘 —— 出处只有 `summary_text`。"""
+        """状态文字(悬停提示):完整版给窗口外的明细卡,紧凑版发给托盘 —— 出处只有 `summary_text`。"""
         return diskbar.summary_text(self._bars, compact=compact)
 
     def _max_ratio(self) -> float:
@@ -620,11 +628,13 @@ class StatusBarWindow(QWidget):
         self._hovered = True
         log.debug("event=hover state=enter")
         self._retarget(animate=False)
+        self._card_timer.start()  # 悬停片刻弹明细卡;到点后再核一遍状态(见 _show_hover_card)
         # 收成尾巴时,指针蹭到尾巴就长回来 —— 这就是"贴边自动隐藏"的唤醒入口
         self.show_handle_view()
 
     def leaveEvent(self, event) -> None:
         self._hovered = False
+        self._hide_hover_card()  # 明细卡跟着悬停走:指针一离开就连定时器一起撤
         log.debug("event=hover state=leave")
         self._retarget(animate=False)
         if self._edge is not None and not self._edge_sliding:
@@ -632,6 +642,34 @@ class StatusBarWindow(QWidget):
             # 形变期间不收:窗口自己在动,Qt 会跟着补一个 Leave ——
             # 不管它的话,刚蹭出来的窗口会立刻又被排上收起(实测就是这个"反着来"的现象)。
             self._edge_timer.start()
+
+    # ---- 悬停明细卡:窗口外的小卡片,绝不覆盖主界面(几何保证见 hovercard.card_pos) ----
+    def _show_hover_card(self) -> None:
+        """定时到点显示明细卡。到这里**再核一遍状态** —— 排上定时器之后一切可能变:
+        指针走了、收成尾巴了、形变没停、穿透开了,哪一样都不该弹。"""
+        if (
+            not self.isVisible()
+            or not self._hovered
+            or self._edge_hidden
+            or self._edge_sliding
+            or bool(self.windowFlags() & Qt.WindowTransparentForInput)
+        ):
+            return
+        bounds = self._screen_bounds()
+        if bounds is None:
+            return
+        left, top, right, bottom = bounds
+        self._hover_card.present(
+            self.summary(),
+            self._ui_scale,
+            self.frameGeometry(),
+            QRect(left, top, right - left, bottom - top),
+        )
+
+    def _hide_hover_card(self) -> None:
+        """明细卡跟着悬停走:指针一离开就藏,连定时器一起取消。"""
+        self._card_timer.stop()
+        self._hover_card.hide()
 
     # ---- 绘制:隐形命中层;尾巴形态再补上小尾巴本身 ----
     def paintEvent(self, event) -> None:
@@ -665,6 +703,7 @@ class StatusBarWindow(QWidget):
         self.setWindowFlag(Qt.WindowTransparentForInput, enabled)
         self.show()  # 改窗口标志会隐藏窗口,必须重新显示
         self._hovered = False
+        self._hide_hover_card()  # 穿透开着就绝不该有明细卡(开着时窗口收不到任何鼠标)
         self._retarget(animate=False)
         # 开启后只能从托盘关掉,日志里必须留下这一笔,否则"窗口怎么点都没反应"查不出来
         log.info("event=click_through enabled=%s", enabled)
@@ -702,6 +741,7 @@ class StatusBarWindow(QWidget):
     def hide_widget(self) -> None:
         """隐藏小组件,并把悬停态清干净 —— 否则下次显示出来会停在全亮。"""
         self._hovered = False
+        self._hide_hover_card()
         self._retarget(animate=False)
         self.hide()
         log.info("event=window state=hidden")
@@ -913,6 +953,10 @@ class StatusBarWindow(QWidget):
             return  # 已经藏起来的窗口收不到 Enter / Leave,不能碰它的悬停态(见 contextMenuEvent)
         self._hovered = self._cursor_on_window()
         self._retarget(animate=False)
+        if self._hovered:
+            # 悬停着就重新排上明细卡:形变 / 拖动 / 菜单 / 缩放之后都走这里重判,
+            # 单靠 enter / leave 会漏(那些期间窗口收不到鼠标事件)。到点后再核状态。
+            self._card_timer.start()
         if self._edge is not None and not self._hovered and not self._edge_sliding:
             self._edge_timer.start()
 
@@ -1005,6 +1049,7 @@ class StatusBarWindow(QWidget):
             # 而且拖动偏移量是相对尾巴算的,一动就对不上。
             self._expand_now(self._edge_anchor)
             self._edge_timer.stop()
+        self._hide_hover_card()  # 按下即拖动开始:卡片跟着旧位置没意义
         self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
         event.accept()
 
@@ -1027,6 +1072,7 @@ class StatusBarWindow(QWidget):
 
     # ---- 右键菜单:无标题条,隐藏 / 刷新 / 退出都在这里 ----
     def contextMenuEvent(self, event) -> None:
+        self._hide_hover_card()  # 右键 = 菜单要来了,菜单压着窗口,明细卡没有意义
         menu = QMenu(self)
         menu.addAction("隐藏", self.hide_widget)
         menu.addAction("立即刷新", self.refresh)

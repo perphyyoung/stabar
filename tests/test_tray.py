@@ -391,13 +391,6 @@ def test_context_reason_does_not_toggle(window, tray_icon) -> None:
     assert window.isVisible()
 
 
-def test_tooltip_follows_window_refresh(window, tray_icon) -> None:
-    """托盘悬停提示跟着刷新走(不用等定时器),而且用**紧凑版**:平台只给 128 个字符。"""
-    window.refresh()
-    assert tray_icon.toolTip() == window.summary(compact=True)
-    assert len(tray_icon.toolTip()) <= tray.TRAY_TIP_MAX
-
-
 def test_autostart_checkbox_reflects_registry(window, tray_icon, fake_registry) -> None:
     tray_icon._sync_state()
     assert not tray_icon._autostart.isChecked()

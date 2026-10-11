@@ -15,8 +15,8 @@ import winreg
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter
+from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtGui import QAction, QColor, QCursor, QGuiApplication, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 import dialogs
 import diskbar
+import hovercard
 import layout
 import paths
 
@@ -43,6 +44,10 @@ if TYPE_CHECKING:  # 只为类型标注:运行时由 main 建好窗口再传进�
     from main import StatusBarWindow
 
 log = logging.getLogger("stabar")
+
+# 托盘图标的悬停轮询间隔:QSystemTrayIcon 没有 enter / leave 事件,只能轮询光标;
+# 150ms 足够跟手,又不至于空转太勤
+TRAY_HOVER_POLL_MS = 150
 
 
 def make_tray_icon() -> QIcon:
@@ -154,7 +159,10 @@ class TrayIcon(QSystemTrayIcon):
     def __init__(self, window: StatusBarWindow) -> None:
         super().__init__(make_tray_icon())
         self._window = window
-        self.setToolTip(paths.APP_NAME)
+        # 原生 tooltip 退休(单行、128 字符上限,装不下逐盘明细,见 开发经验 48):
+        # 悬停明细改用与主界面同一套自绘卡片(hovercard)。代价:图标进了溢出区拿不到
+        # 矩形(`geometry()` 为空)时没有任何悬停提示 —— 那种图标本来就点不准。
+        self.setToolTip("")
 
         self._menu = QMenu()
         # 菜单项默认**不**显示提示(QMenu::toolTipsVisible 默认 false),要显式打开;
@@ -223,9 +231,21 @@ class TrayIcon(QSystemTrayIcon):
         self.setContextMenu(self._menu)
 
         self.activated.connect(self._on_activated)
-        window.updated.connect(self.setToolTip)
-        # 窗口在托盘创建之前就 refresh 过一次,那次信号没人接,这里补上当前值(托盘用紧凑版)
-        self.setToolTip(window.summary(compact=True))
+        # 悬停文字:紧凑版(盘符 + 占比),**一盘一行**。窗口在托盘创建之前就 refresh 过一次,
+        # 那次信号没人接,这里补上当前值。卡片与原生 tooltip 兜底用的是同一份文字。
+        self._summary = window.summary(compact=True)
+        window.updated.connect(self._on_summary_updated)
+        self._card = hovercard.HoverCard()
+        self._was_on_icon = False
+        self._poll = QTimer(self)
+        self._poll.setInterval(TRAY_HOVER_POLL_MS)
+        self._poll.timeout.connect(self._poll_hover)
+        self._poll.start()
+        self._card_timer = QTimer(self)
+        self._card_timer.setSingleShot(True)
+        self._card_timer.setInterval(hovercard.SHOW_DELAY_MS)
+        self._card_timer.timeout.connect(self._show_card)
+        self._menu.aboutToShow.connect(self._hide_card)  # 菜单要开了,明细卡让位
 
     def _sync_state(self) -> None:
         """菜单弹出前,把文字和勾选对齐到窗口的真实状态。"""
@@ -595,8 +615,57 @@ class TrayIcon(QSystemTrayIcon):
         self._sync_state()
 
     def _on_activated(self, reason) -> None:
+        self._hide_card()  # 点击(左键切显示 / 右键弹菜单):明细卡跟着收
         # 左键单击切换显示;右键是菜单,由系统直接弹出,不走这里
         # 记下来路:短时间内第二次点击会被当成双击(DoubleClick),这正是"点了没反应"的常见原因
         log.debug("event=tray activated=%s", reason.name)
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._toggle_visible()
+
+    # ---- 悬停明细卡:与主界面同一套(见 hovercard);托盘图标没有悬停事件,轮询兜底 ----
+    def _poll_hover(self) -> None:
+        """轮询光标是否落在图标矩形里,按**边沿**触发:刚进入排上显示,刚离开立即收。
+
+        ⚠️ 图标矩形可能拿不到:`QSystemTrayIcon.geometry()` 依赖 Qt 在 Windows 上用老式
+        toolbar 消息定位图标,本机(Win11)实测**恒为空矩形** —— 那就走兜底:原生 tooltip
+        恢复紧凑提示(与旧版行为一致,不能比现状差),卡片这条路留给几何可用的系统。
+        """
+        geometry = self.geometry()
+        if geometry.isNull():
+            self._hide_card()
+            self._was_on_icon = False
+            if self.toolTip() != self._summary:
+                self.setToolTip(self._summary)
+            return
+        if self.toolTip():
+            self.setToolTip("")  # 卡片模式生效:原生提示别再叠上来
+        inside = geometry.contains(QCursor.pos())
+        if inside and not self._was_on_icon:
+            self._card_timer.start()
+        elif not inside and self._was_on_icon:
+            self._hide_card()
+        self._was_on_icon = inside
+
+    def _show_card(self) -> None:
+        """到点显示明细卡。图标在任务栏里,任务栏在可用区**外**,所以 `card_pos` 的"下方放不下
+        翻上方"在这里自然落在图标上方 —— 正是托盘悬停提示该在的位置。"""
+        geometry = self.geometry()
+        if geometry.isNull() or not self.isVisible():
+            return
+        screen = QGuiApplication.screenAt(geometry.center()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        self._card.present(
+            self._summary, self._window.ui_scale, geometry, screen.availableGeometry()
+        )
+
+    def _hide_card(self) -> None:
+        """明细卡跟着悬停走:离开图标(或点了图标 / 开了菜单)就连定时器一起撤。"""
+        self._card_timer.stop()
+        self._card.hide()
+
+    def _on_summary_updated(self, text: str) -> None:
+        """窗口刷新 → 换悬停文字(紧凑版,一盘一行),卡片开着就当场换字。"""
+        self._summary = text
+        if self._card.isVisible():
+            self._card.update_text(text, self._window.ui_scale)

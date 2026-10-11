@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 import diskbar
 import drives
+import hovercard
 import layout
 import main
 import paths
@@ -28,27 +29,80 @@ def test_low_usage_keeps_configured_opacity(window) -> None:
 
 
 def test_hover_details_cover_the_whole_window(window) -> None:
-    """整块区域悬停都能出详情:窗口开 `WA_AlwaysShowToolTips`,盘条不接收鼠标事件。
+    """整块区域悬停都能出详情:盘条不接收鼠标事件,明细由窗口外的卡片负责(不再用 tooltip)。
 
     真人实测的"详情时有时无"来自两处:tooltip 默认只对活动窗口显示(本窗口置顶、从不被激活),
-    以及盘条铺满窗口挡住了挂在窗口上的详情。
+    以及盘条铺满窗口挡住了挂在窗口上的详情。明细卡(`hovercard`)整块对鼠标透明,不参与命中。
     """
-    assert window.testAttribute(Qt.WA_AlwaysShowToolTips)
-    assert window.toolTip()  # 详情文字挂在窗口上
+    assert window.toolTip() == ""  # 窗口上不再挂 tooltip:它会弹在主界面上
     assert window._bars
     assert all(bar.testAttribute(Qt.WA_TransparentForMouseEvents) for bar in window._bars)
+    assert window._hover_card.windowFlags() & Qt.WindowTransparentForInput  # 卡片不抢悬停(命门)
 
 
 def test_hover_text_has_one_source_and_two_lengths(window) -> None:
-    """悬停提示只有一处实现:窗口用完整明细,托盘用紧凑版(平台只给 128 个字符)。"""
-    assert window.toolTip() == window.summary()  # 窗口上挂的就是完整版
+    """悬停提示只有一处实现:完整明细给卡片,紧凑版给托盘(平台只给 128 个字符)。"""
+    window._hover_card.update_text(window.summary(), window.ui_scale)
+    assert window._hover_card.text == window.summary()  # 卡片挂的就是完整版
     assert window.summary() == diskbar.summary_text(window._bars)  # 出处只有 summary_text
     assert window.summary(compact=True) == diskbar.summary_text(window._bars, compact=True)
 
     full, compact = window.summary(), window.summary(compact=True)
-    assert "\n" in full and "\n" not in compact  # 完整版多行、紧凑版一行
+    assert "\n" in full and "\n" in compact  # 都是逐盘一行:完整版带明细,紧凑版只有盘符+占比
     assert all(bar.short_text() in compact for bar in window._bars)
-    assert len(compact) <= tray.TRAY_TIP_MAX
+    assert "已用" not in compact  # 紧凑版不带明细
+    assert len(compact) <= tray.TRAY_TIP_MAX  # 紧凑版走原生 tooltip 兜底时仍有 128 字符上限
+
+
+def test_hover_card_appears_after_the_delay_and_off_the_window(qtbot, window) -> None:
+    """悬停片刻后明细卡出现在窗口**外面**:与窗口矩形不相交,内容就是完整明细。"""
+    from PySide6.QtCore import QRect
+
+    window.show()
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Enter))
+    qtbot.waitUntil(window._hover_card.isVisible, timeout=hovercard.SHOW_DELAY_MS + 1000)
+    card = window._hover_card
+    assert not QRect(card.pos(), card.size()).intersects(window.frameGeometry())
+    assert card.text == window.summary()
+
+
+def test_hover_card_hides_as_soon_as_the_pointer_leaves(qtbot, window) -> None:
+    """指针一离开就连卡片带定时器一起撤,不等 500ms 走完。"""
+    window.show()
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Enter))
+    qtbot.waitUntil(window._hover_card.isVisible, timeout=hovercard.SHOW_DELAY_MS + 1000)
+
+    QApplication.sendEvent(window, QEvent(QEvent.Type.Leave))
+
+    assert not window._hover_card.isVisible()
+    assert not window._card_timer.isActive()
+
+
+def test_hover_card_stays_hidden_when_click_through_is_on(window) -> None:
+    """穿透开着时窗口收不到任何鼠标,明细卡也绝不能弹。"""
+    window.show()
+    window.set_click_through(True)
+    window._hovered = True  # 模拟"指针还悬停着"(穿透时真事件不会来)
+    try:
+        window._show_hover_card()  # 直接催一次:绕过定时器
+        assert not window._hover_card.isVisible()
+    finally:
+        window.set_click_through(False)
+
+
+def test_hover_card_stays_hidden_while_collapsed(window, qtbot) -> None:
+    """收成尾巴时不弹明细卡:尾巴上没有进度条,明细要等长回展开形态才有意义。"""
+    area = main.QApplication.primaryScreen().availableGeometry()
+    window.show()
+    window.move(area.left(), area.top() + 100)  # 贴左:不贴边就判不成贴边,后面收不起来
+    window.set_edge_hide(True)
+    window._hide_to_edge()
+    qtbot.waitUntil(lambda: window.edge_hidden, timeout=1000)
+
+    window._hovered = True  # 模拟"指针悬停着"(真流程里收起前 Leave 已把悬停清掉)
+    window._show_hover_card()
+
+    assert not window._hover_card.isVisible()
 
 
 def test_brightness_only_from_hover_or_thresholds(window, monkeypatch) -> None:

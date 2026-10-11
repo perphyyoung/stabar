@@ -8,8 +8,10 @@ from itertools import pairwise
 
 import pytest
 from e2e_support import center_of_rect, screen_bounds, visible_size
+from PySide6.QtCore import QPoint, QRect, QSize
 
 import drives
+import hovercard
 import layout
 import main
 
@@ -226,3 +228,32 @@ def test_read_disk_returns_none_when_query_fails(monkeypatch) -> None:
 
     monkeypatch.setattr(drives.shutil, "disk_usage", boom)
     assert drives.read_disk("Z:/") is None
+
+
+def test_card_pos_sits_below_the_window_by_default() -> None:
+    """默认在窗口**下方** 4px、左对齐 —— 稳定不晃,不跟随光标。"""
+    window = QRect(100, 100, 248, 62)
+    card = QSize(200, 40)
+    area = QRect(0, 0, 1920, 1040)
+
+    pos = hovercard.card_pos(window, card, area)
+
+    assert pos == QPoint(100, 100 + 62 + hovercard.GAP)
+
+
+def test_card_pos_never_intersects_the_window() -> None:
+    """核心要求:hover 文字不覆盖主界面 —— 各方位、各种放不下都要与窗口矩形**不相交**。"""
+    area = QRect(0, 0, 1920, 1040)
+    card = QSize(200, 40)
+    cases = [
+        QRect(100, 100, 248, 62),  # 中间:下方
+        QRect(100, 1040 - 40, 248, 40),  # 贴底:翻上方
+        QRect(1700, 100, 200, 62),  # 右缘:x 被夹进屏幕
+        QRect(0, 0, 248, 62),  # 左上角
+        QRect(100, 960, 248, 70),  # 底部且下方翻不上时的夹取路径
+    ]
+    for window in cases:
+        pos = hovercard.card_pos(window, card, area)
+        card_rect = QRect(pos, card)
+        assert not card_rect.intersects(window), f"卡片盖住了窗口:window={window}"
+        assert area.contains(card_rect), f"卡片跑到屏幕外:window={window}"
